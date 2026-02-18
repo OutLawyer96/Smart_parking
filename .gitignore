@@ -1,0 +1,35 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# YOLOv8 training outputs
+runs/
+
+# Dataset (optional - uncomment if you don't want to push dataset)
+# dataset/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model weights (optional - uncomment if model files are large)
+# *.pt
+# *.pth
+
+# Logs
+*.log
