@@ -27,8 +27,11 @@ __pycache__/
 Thumbs.db
 
 # Model weights (optional - uncomment if model files are large)
-# *.pt
-# *.pth
+*.pt
+*.pth
+runs/
+dataset/
+dataset_finetune/
 
 # Logs
 *.log
