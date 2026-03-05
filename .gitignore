@@ -11,8 +11,7 @@ __pycache__/
 *.so
 .Python
 
-# YOLOv8 training outputs
-runs/
+
 
 # Dataset (optional - uncomment if you don't want to push dataset)
 # dataset/

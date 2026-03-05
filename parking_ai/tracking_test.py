@@ -3,8 +3,8 @@ import time
 from ultralytics import YOLO
 
 def main():
-    model = YOLO("runs/detect/train2/weights/best.pt")
-    cap = cv2.VideoCapture("http://100.98.138.181:8080/video")
+    model = YOLO("runs/detect/runs/finetune/real_cars_v12/weights/best.pt")
+    cap = cv2.VideoCapture("http://100.87.109.151:8080/video")
 
     while True:
         start_time = time.time()

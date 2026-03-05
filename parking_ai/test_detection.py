@@ -5,7 +5,7 @@ cap = cv2.VideoCapture(0)
 ret, frame = cap.read()
 cap.release()
 
-detector = VehicleDetector("yolov8n.pt")
+detector = VehicleDetector()  # uses fine-tuned model by default
 
 detections = detector.detect(frame)
 print(detections)

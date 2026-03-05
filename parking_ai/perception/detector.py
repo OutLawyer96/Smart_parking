@@ -1,22 +1,25 @@
 from ultralytics import YOLO
 import numpy as np
 
+# Path to the fine-tuned model (trained on real toy car images)
+DEFAULT_MODEL_PATH = "runs/detect/runs/finetune/real_cars_v12/weights/best.pt"
+
 
 class VehicleDetector:
-    def __init__(self, model_path: str = "yolov8n.pt", confidence: float = 0.4):
-        
+    def __init__(self, model_path: str = DEFAULT_MODEL_PATH, confidence: float = 0.60):
         self.model = YOLO(model_path)
         self.confidence = confidence
 
-        # COCO class IDs for vehicles
-        self.vehicle_classes = [2, 3, 5, 7]  # car, motorcycle, bus, truck
+        # Custom dataset has a single class: car (class 0)
+        self.vehicle_classes = [0]  # toy car
+        self.class_names = {0: "car"}
 
     def detect(self, frame: np.ndarray):
         """
-        Run detection on a single frame.
+        Run detection on a single frame using the fine-tuned toy car model.
 
         Returns:
-            List of dictionaries with bounding box info.
+            List of dicts: {bbox, confidence, class_id, label}
         """
         results = self.model(frame, conf=self.confidence, verbose=False)
 
@@ -37,7 +40,8 @@ class VehicleDetector:
                 detections.append({
                     "bbox": [int(x1), int(y1), int(x2), int(y2)],
                     "confidence": confidence,
-                    "class_id": class_id
+                    "class_id": class_id,
+                    "label": self.class_names.get(class_id, "car")
                 })
 
         return detections

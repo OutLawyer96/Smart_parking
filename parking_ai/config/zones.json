@@ -1,0 +1,51 @@
+{
+  "unlabeled_is_restricted": true,
+  "zones": [
+    {
+      "id": "zone_0",
+      "type": "parking",
+      "name": "parking_0",
+      "points": [
+        [
+          148,
+          24
+        ],
+        [
+          144,
+          429
+        ],
+        [
+          397,
+          439
+        ],
+        [
+          383,
+          3
+        ]
+      ]
+    },
+    {
+      "id": "zone_1",
+      "type": "drive",
+      "name": "drive_0",
+      "points": [
+        [
+          64,
+          33
+        ],
+        [
+          148,
+          24
+        ],
+        [
+          143,
+          429
+        ],
+        [
+          65,
+          425
+        ]
+      ]
+    }
+  ]
+}

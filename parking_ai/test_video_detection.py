@@ -29,7 +29,7 @@ class VehicleDetector:
 
 
 def main():
-    model_path = "runs/detect/train2/weights/best.pt"
+    model_path = "runs/detect/runs/finetune/real_cars_v12/weights/best.pt"
 
     detector = VehicleDetector(model_path, conf_threshold=0.6)
 
