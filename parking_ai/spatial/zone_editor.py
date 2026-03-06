@@ -24,12 +24,13 @@ import argparse
 import sys
 
 # Zone type definitions
-ZONE_TYPES = ["parking", "drive", "restricted"]
+ZONE_TYPES = ["parking", "drive", "restricted", "exit"]
 
 ZONE_COLORS = {
     "parking":    (0,   210,  60),   # green
     "drive":      (30,  160, 255),   # orange-ish
     "restricted": (0,    50, 220),   # red
+    "exit":       (255, 150,  50),   # blue
 }
 
 FILL_ALPHA = 0.30   # how transparent the polygon fill is
@@ -107,6 +108,7 @@ class ZoneEditor:
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
         print(f"[editor] Saved {len(self.zones)} zones → {path}  (unlabeled areas = restricted)")
+        self._validate_exits()
 
     def load(self, path: str = CONFIG_PATH):
         if not os.path.exists(path):
@@ -116,6 +118,44 @@ class ZoneEditor:
         self.zones = data.get("zones", [])
         self._zone_counter = len(self.zones)
         print(f"[editor] Loaded {len(self.zones)} zones from {path}")
+
+    def _validate_exits(self):
+        """Warn if any parking zone has no exit zone touching it."""
+        parking = [z for z in self.zones if z["type"] == "parking"]
+        exits   = [z for z in self.zones if z["type"] == "exit"]
+
+        if parking and not exits:
+            print("[editor] WARNING: No exit zones (blue) defined!")
+            print("[editor]   Draw exit zones touching each parking zone.")
+            return
+
+        for pz in parking:
+            pz_pts = np.array(pz["points"], dtype=np.float32)
+            has_exit = False
+            for ez in exits:
+                # Check if any exit vertex is inside/near this parking zone
+                for pt in ez["points"]:
+                    dist = cv2.pointPolygonTest(
+                        pz_pts, (float(pt[0]), float(pt[1])), True)
+                    if dist >= -15:          # inside or within 15 px
+                        has_exit = True
+                        break
+                if has_exit:
+                    break
+                # Reverse: parking vertex inside/near exit zone
+                ez_pts = np.array(ez["points"], dtype=np.float32)
+                for pt in pz["points"]:
+                    dist = cv2.pointPolygonTest(
+                        ez_pts, (float(pt[0]), float(pt[1])), True)
+                    if dist >= -15:
+                        has_exit = True
+                        break
+                if has_exit:
+                    break
+
+            if not has_exit:
+                print(f"[editor] WARNING: '{pz['name']}' has no exit zone!")
+                print(f"[editor]   Draw an exit zone (blue) touching it.")
 
     # ── drawing ───────────────────────────────
 

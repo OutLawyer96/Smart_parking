@@ -129,11 +129,16 @@ class LayoutEngine:
 
     # ── public ───────────────────────────────
 
-    def generate_all(self, zone_map, calibration) -> list[dict]:
+    def generate_all(self, zone_map, calibration, pinned_slots=None) -> list[dict]:
         """
         Generate slots for every parking zone in zone_map.
-        Drive zones are detected automatically so that slots align along
-        the parking / drive boundary and cars enter from the correct side.
+
+        In open mode the engine tries all orientations across the ENTIRE
+        zone and filters out candidates that overlap any pinned (pre-parked)
+        car, so freed aisle space can host slots in a different orientation.
+
+        In parallel / angled modes pinned cars act as fixed anchors —
+        slots in each row are shifted to maximise count around them.
         """
         slots = []
         parking_zones = zone_map.zones_by_type("parking")
@@ -149,11 +154,19 @@ class LayoutEngine:
             dz_px = [tuple(p) for p in dz["points"]]
             drive_polys_wld.append(calibration.polygon_to_world(dz_px))
 
+        # Build obstacle pixel-polygons from pinned (pre-parked) slots
+        obstacle_polys_px = []
+        if pinned_slots:
+            obstacle_polys_px = [
+                np.array(s["polygon_px"], dtype=np.int32)
+                for s in pinned_slots
+            ]
+
         for zone in parking_zones:
             zone_px   = [tuple(p) for p in zone["points"]]
             zone_wld  = calibration.polygon_to_world(zone_px)
             new_slots = self._generate(zone_wld, zone["name"], calibration,
-                                       drive_polys_wld)
+                                       drive_polys_wld, obstacle_polys_px)
             slots.extend(new_slots)
             print(f"[LayoutEngine] Zone '{zone['name']}': "
                   f"{len(new_slots)} {self.parking_type} slots")
@@ -163,14 +176,15 @@ class LayoutEngine:
 
     # ── routing ──────────────────────────────
 
-    def _generate(self, poly_world, zone_name, calibration, drive_polys):
+    def _generate(self, poly_world, zone_name, calibration, drive_polys,
+                  obstacle_polys_px=None):
         dispatch = {
             "open":     self._layout_open,
             "parallel": self._layout_parallel,
             "angled":   self._layout_angled,
         }
         return dispatch[self.parking_type](poly_world, zone_name, calibration,
-                                           drive_polys)
+                                           drive_polys, obstacle_polys_px)
 
     # ── drive-edge helpers ───────────────────
 
@@ -290,7 +304,8 @@ class LayoutEngine:
     # the far (restricted) edge; leftover space near the drive zone
     # becomes the exit aisle.
 
-    def _layout_open(self, poly_world, zone_name, cal, drive_polys):
+    def _layout_open(self, poly_world, zone_name, cal, drive_polys,
+                     obstacle_polys_px=None):
         origin, u_hat, v_hat = self._drive_frame(poly_world, drive_polys)
         u0, u1, v0, v1 = self._local_extent(poly_world, origin, u_hat, v_hat)
         zone_np = np.array(poly_world, dtype=np.float32)
@@ -386,7 +401,23 @@ class LayoutEngine:
             _generate_par(),
             _generate_ang(),
         ]
-        best_polys = max(candidates, key=len)
+
+        # In open mode, filter every orientation's candidates against
+        # obstacle polygons (pinned / pre-parked cars) so the winning
+        # orientation is the one that yields the most NON-overlapping
+        # slots across the whole zone — freed aisle areas naturally
+        # become available for alternative orientations.
+        if obstacle_polys_px:
+            filtered = []
+            for cand_polys in candidates:
+                kept = [p for p in cand_polys
+                        if not _overlaps_any(
+                            [cal.to_pixel(pt) for pt in p],
+                            obstacle_polys_px)]
+                filtered.append(kept)
+            best_polys = max(filtered, key=len)
+        else:
+            best_polys = max(candidates, key=len)
 
         slots = []
         for i, p in enumerate(best_polys):
@@ -399,7 +430,8 @@ class LayoutEngine:
     # toward v0 (drive zone).  Leftover space near the drive zone
     # becomes the exit lane.  Slots along u are spread edge-to-edge.
 
-    def _layout_parallel(self, poly_world, zone_name, cal, drive_polys):
+    def _layout_parallel(self, poly_world, zone_name, cal, drive_polys,
+                         obstacle_polys_px=None):
         origin, u_hat, v_hat = self._drive_frame(poly_world, drive_polys)
         u0, u1, v0, v1 = self._local_extent(poly_world, origin, u_hat, v_hat)
         zone_np = np.array(poly_world, dtype=np.float32)
@@ -424,11 +456,28 @@ class LayoutEngine:
             row_vs.append(v_start)
             v_cur = v_start - aisle
 
-        # Spread slots along u per row
-        u_positions = self._spread_positions(u0, u1, slot_len)
+        # Convert obstacles to local (u,v) bounding boxes
+        obs_local = _obstacles_to_local(obstacle_polys_px, cal,
+                                        origin, u_hat, v_hat)
 
         slots, n = [], 0
         for rv in row_vs:
+            row_v0, row_v1 = rv, rv + slot_wid
+
+            # Find obstacles that overlap this row's v-range
+            row_obs = [(ou0, ou1) for (ou0, ou1, ov0, ov1) in obs_local
+                       if ov1 > row_v0 - 0.5 and ov0 < row_v1 + 0.5]
+
+            if not row_obs:
+                u_positions = self._spread_positions(u0, u1, slot_len)
+            else:
+                row_obs.sort()
+                segments = _free_segments(u0, u1, row_obs)
+                u_positions = []
+                for seg_s, seg_e in segments:
+                    u_positions.extend(
+                        self._spread_positions(seg_s, seg_e, slot_len))
+
             for pu in u_positions:
                 poly = self._make_rect(pu, rv, slot_len, slot_wid,
                                        origin, u_hat, v_hat)
@@ -443,7 +492,8 @@ class LayoutEngine:
     # Rows packed flush against v1 (restricted edge) toward v0 (drive).
     # Slots along u spread edge-to-edge.
 
-    def _layout_angled(self, poly_world, zone_name, cal, drive_polys):
+    def _layout_angled(self, poly_world, zone_name, cal, drive_polys,
+                       obstacle_polys_px=None):
         origin, u_hat, v_hat = self._drive_frame(poly_world, drive_polys)
         u0, u1, v0, v1 = self._local_extent(poly_world, origin, u_hat, v_hat)
         zone_np = np.array(poly_world, dtype=np.float32)
@@ -475,11 +525,28 @@ class LayoutEngine:
             row_vs.append(v_start)
             v_cur = v_start - aisle
 
-        # Spread slots along u per row (accounting for the shear)
-        u_positions = self._spread_positions(u0, u1 - shift_u, step_u)
+        # Convert obstacles to local (u,v) bounding boxes
+        obs_local = _obstacles_to_local(obstacle_polys_px, cal,
+                                        origin, u_hat, v_hat)
 
         slots, n = [], 0
         for rv in row_vs:
+            row_v0, row_v1 = rv, rv + depth_v
+
+            # Find obstacles that overlap this row's v-range
+            row_obs = [(ou0, ou1) for (ou0, ou1, ov0, ov1) in obs_local
+                       if ov1 > row_v0 - 0.5 and ov0 < row_v1 + 0.5]
+
+            if not row_obs:
+                u_positions = self._spread_positions(u0, u1 - shift_u, step_u)
+            else:
+                row_obs.sort()
+                segments = _free_segments(u0, u1, row_obs)
+                u_positions = []
+                for seg_s, seg_e in segments:
+                    u_positions.extend(
+                        self._spread_positions(seg_s, seg_e - shift_u, step_u))
+
             for pu in u_positions:
                 poly = [
                     self._to_world_pt(pu,                    rv,            origin, u_hat, v_hat),
@@ -521,6 +588,63 @@ class LayoutEngine:
 
 
 # ─── helpers ──────────────────────────────────
+
+def _obstacles_to_local(obstacle_polys_px, cal, origin, u_hat, v_hat):
+    """Convert pixel obstacle polygons to local (u,v) bounding boxes.
+    Returns list of (u_min, u_max, v_min, v_max)."""
+    if not obstacle_polys_px:
+        return []
+    result = []
+    for obs_px in obstacle_polys_px:
+        obs_wld = [cal.to_world(tuple(p)) for p in obs_px]
+        obs_uv  = [LayoutEngine._to_local(pt, origin, u_hat, v_hat)
+                   for pt in obs_wld]
+        us = [uv[0] for uv in obs_uv]
+        vs = [uv[1] for uv in obs_uv]
+        result.append((min(us), max(us), min(vs), max(vs)))
+    return result
+
+
+def _free_segments(u0, u1, obstacles):
+    """Given sorted obstacle u-ranges [(obs_u0, obs_u1), ...],
+    return free segments [(start, end), ...] between them."""
+    segments = []
+    cursor = u0
+    for obs_u0, obs_u1 in obstacles:
+        if cursor < obs_u0 - 0.5:
+            segments.append((cursor, obs_u0))
+        cursor = max(cursor, obs_u1)
+    if cursor < u1 - 0.5:
+        segments.append((cursor, u1))
+    return segments
+
+
+def _overlaps_any(poly_px, obstacle_polys, threshold=0.15):
+    """Return True if poly_px overlaps any obstacle polygon above threshold."""
+    pts = np.array(poly_px, dtype=np.int32)
+    x_min = max(int(pts[:, 0].min()) - 1, 0)
+    y_min = max(int(pts[:, 1].min()) - 1, 0)
+    x_max = int(pts[:, 0].max()) + 2
+    y_max = int(pts[:, 1].max()) + 2
+    w, h = x_max - x_min, y_max - y_min
+    if w <= 0 or h <= 0:
+        return True
+    slot_mask = np.zeros((h, w), dtype=np.uint8)
+    shifted = pts - np.array([x_min, y_min], dtype=np.int32)
+    cv2.fillPoly(slot_mask, [shifted], 255)
+    slot_area = float(np.count_nonzero(slot_mask))
+    if slot_area == 0:
+        return True
+    for obs in obstacle_polys:
+        obs_pts = obs.copy()
+        obs_shifted = obs_pts - np.array([x_min, y_min], dtype=np.int32)
+        obs_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(obs_mask, [obs_shifted], 255)
+        inter = float(np.count_nonzero(cv2.bitwise_and(slot_mask, obs_mask)))
+        if inter / slot_area > threshold:
+            return True
+    return False
+
 
 def _bbox(poly: list) -> tuple:
     xs = [p[0] for p in poly]

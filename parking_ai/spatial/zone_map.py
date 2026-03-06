@@ -30,6 +30,7 @@ ZONE_COLORS = {
     "parking":    (0,   210,  60),
     "drive":      (30,  160, 255),
     "restricted": (0,    50, 220),
+    "exit":       (255, 150,  50),
 }
 
 FILL_ALPHA = 0.20
@@ -73,11 +74,13 @@ class ZoneMap:
     def get_zone_at(self, point: tuple) -> Optional[dict]:
         """
         Returns the zone whose polygon contains `point`.
+        Zones are checked in reverse order so that later (top-drawn)
+        zones take priority over earlier ones.
         If the point is outside all defined zones and unlabeled_is_restricted
         is True (default), returns a synthetic restricted zone instead of None.
         `point` is (x, y) pixel coordinates.
         """
-        for zone, poly in zip(self._zones, self._polygons):
+        for zone, poly in zip(reversed(self._zones), reversed(self._polygons)):
             result = cv2.pointPolygonTest(poly, (float(point[0]), float(point[1])), False)
             if result >= 0:
                 return zone
@@ -86,17 +89,11 @@ class ZoneMap:
         return None
 
     def is_in_type(self, point: tuple, zone_type: str) -> bool:
-        """True if point lies inside any zone of the given type."""
-        for zone, poly in zip(self._zones, self._polygons):
-            if zone["type"] != zone_type:
-                continue
-            result = cv2.pointPolygonTest(poly, (float(point[0]), float(point[1])), False)
-            if result >= 0:
-                return True
-        # unlabeled area counts as restricted
-        if zone_type == "restricted" and self.unlabeled_is_restricted:
-            return True
-        return False
+        """True if the highest-priority zone at point matches zone_type."""
+        zone = self.get_zone_at(point)
+        if zone is None:
+            return False
+        return zone["type"] == zone_type
 
     def zones_by_type(self, zone_type: str) -> list[dict]:
         """Return all zones of a given type."""

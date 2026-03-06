@@ -6,6 +6,8 @@ from spatial.calibration import CalibrationMap
 from spatial.zone_map import ZoneMap
 from reasoning.layout_engine import LayoutEngine
 from reasoning.occupancy import OccupancyEngine
+from reasoning.exit_path import filter_slots_by_exit_path
+from reasoning.preparked import StoppedCarMonitor
 
 # ── Session config ────────────────────────────────────────────────────────────
 # Default parking mode. Press M at runtime to cycle modes.
@@ -70,15 +72,35 @@ def filter_restricted(detections: list, zones: ZoneMap) -> list:
     return allowed
 
 
-def rebuild_layout(parking_type, zones, calibration, vehicle_dims=None):
+def rebuild_layout(parking_type, zones, calibration, vehicle_dims=None,
+                   pinned_slots=None):
     """Rebuild slot layout and occupancy engine for the given mode."""
     engine = LayoutEngine(
         parking_type=parking_type,
         calibrated=calibration.is_calibrated,
         vehicle_dims=vehicle_dims,
     )
-    slots = engine.generate_all(zones, calibration)
-    return OccupancyEngine(slots)
+    # The engine generates obstacle-aware layouts:
+    #   open mode   → tries all orientations, filters overlaps with pinned
+    #                  cars, picks orientation with most non-overlapping slots
+    #   par / angled → shifts slots along each row around pinned anchors
+    generated = engine.generate_all(zones, calibration,
+                                    pinned_slots=pinned_slots)
+
+    # Combine generated + pinned before exit-path filter
+    all_slots = generated + (pinned_slots or [])
+
+    # Car width for exit-path width check — from backend dims or fallback
+    car_width_px = None
+    if vehicle_dims and "width_px" in vehicle_dims:
+        car_width_px = vehicle_dims["width_px"]
+
+    all_slots, warnings = filter_slots_by_exit_path(
+        all_slots, zones, car_width_px=car_width_px
+    )
+    for w in warnings:
+        print(w)
+    return OccupancyEngine(all_slots)
 
 
 def main():
@@ -89,13 +111,14 @@ def main():
     zones = ZoneMap()
     zones.load()
 
-    # ── Compute slot layout ───────────────────
-    parking_type    = PARKING_TYPE
-    debug_occupancy = DEBUG_OCCUPANCY
-    occupancy = rebuild_layout(parking_type, zones, calibration, VEHICLE_DIMS)
-
     # ── Perception ───────────────────────────
     tracker = VehicleTracker()
+
+    # ── Continuous stopped-car monitor ────────
+    stopped_monitor = StoppedCarMonitor(zones)
+
+    parking_type    = PARKING_TYPE
+    debug_occupancy = DEBUG_OCCUPANCY
 
     with CameraStream() as cam:
         # ── Create fullscreen window before the loop ──
@@ -103,6 +126,10 @@ def main():
         cv2.setWindowProperty("Smart Parking System",
                               cv2.WND_PROP_FULLSCREEN,
                               cv2.WINDOW_FULLSCREEN)
+
+        # ── Initial layout (no pinned slots yet — monitor needs time) ──
+        occupancy = rebuild_layout(parking_type, zones, calibration,
+                                   VEHICLE_DIMS)
 
         while True:
             start_time = time.time()
@@ -120,6 +147,15 @@ def main():
 
             # ── Drop detections in restricted zones ──
             detections = filter_restricted(detections, zones)
+
+            # ── Stopped-car monitor (every frame) ──
+            pins_changed = stopped_monitor.update(detections)
+            if pins_changed:
+                pinned = stopped_monitor.pinned_slots()
+                print(f"[Main] Pinned slots changed ({len(pinned)} active) "
+                      f"→ rebuilding layout")
+                occupancy = rebuild_layout(parking_type, zones, calibration,
+                                           VEHICLE_DIMS, pinned)
 
             # ── Occupancy update ──────────────
             occupancy.update(detections)
@@ -147,7 +183,9 @@ def main():
                 idx = PARKING_MODES.index(parking_type)
                 parking_type = PARKING_MODES[(idx + 1) % len(PARKING_MODES)]
                 print(f"[Main] Switching parking mode → {parking_type}")
-                occupancy = rebuild_layout(parking_type, zones, calibration, VEHICLE_DIMS)
+                occupancy = rebuild_layout(
+                    parking_type, zones, calibration, VEHICLE_DIMS,
+                    stopped_monitor.pinned_slots())
             elif key == ord("d") or key == ord("D"):
                 debug_occupancy = not debug_occupancy
                 print(f"[Main] Debug overlay {'ON' if debug_occupancy else 'OFF'}")

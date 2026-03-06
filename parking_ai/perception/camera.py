@@ -1,7 +1,7 @@
 import cv2
 
 # IP camera stream (phone/Raspberry Pi via DroidCam or similar)
-DEFAULT_STREAM_URL = "http://100.115.2.204:8080/video"
+DEFAULT_STREAM_URL = "http://100.111.201.140:8080/video"
 
 
 class CameraStream:
