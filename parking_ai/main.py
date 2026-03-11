@@ -1,5 +1,7 @@
 import cv2
 import time
+import threading
+from datetime import datetime, timezone
 from perception.camera import CameraStream
 from perception.tracker import VehicleTracker
 from spatial.calibration import CalibrationMap
@@ -8,6 +10,9 @@ from reasoning.layout_engine import LayoutEngine
 from reasoning.occupancy import OccupancyEngine
 from reasoning.exit_path import filter_slots_by_exit_path
 from reasoning.preparked import StoppedCarMonitor
+from reasoning.slot_recommender import SlotRecommender
+from api.state import ParkingState
+from api.route_planner import RoutePlanner
 
 # ── Session config ────────────────────────────────────────────────────────────
 # Default parking mode. Press M at runtime to cycle modes.
@@ -103,6 +108,62 @@ def rebuild_layout(parking_type, zones, calibration, vehicle_dims=None,
     return OccupancyEngine(all_slots)
 
 
+def _start_api_server():
+    """Run the FastAPI server in a background thread."""
+    import uvicorn
+    from api.server import app
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+
+
+def _check_parking_events(state, occupancy, detections):
+    """
+    For each assigned car, check if it has parked (on the correct or
+    wrong slot) or stopped, and emit parking_event messages.
+    """
+    det_map = {d["track_id"]: d for d in detections}
+
+    for tid, assignment in list(state.assignments.items()):
+        if assignment["status"].startswith("parked"):
+            continue  # already finalized
+
+        assigned_slot_id = assignment["slot"]["slot_id"]
+
+        # Find which slot this car is currently occupying (if any)
+        actual_slot = None
+        for slot in occupancy.slots:
+            if slot.get("assigned_track_id") == tid and slot["status"] == "occupied":
+                actual_slot = slot
+                break
+
+        if actual_slot is None:
+            # Check if car has stopped (not occupying any slot)
+            det = det_map.get(tid)
+            if det is None:
+                continue
+            # Car is still moving or not on a slot yet
+            assignment["status"] = "moving"
+            continue
+
+        now = time.time()
+        if actual_slot["slot_id"] == assigned_slot_id:
+            assignment["status"] = "parked_correct"
+        else:
+            assignment["status"] = "parked_incorrect"
+
+        assignment["parked_at"] = now
+
+        state.add_parking_event({
+            "event": "parking_event",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tracking_id": tid,
+            "status": assignment["status"],
+            "assigned_slot": assigned_slot_id,
+            "actual_slot": actual_slot["slot_id"],
+            "parked_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+            "duration_seconds": 0,
+        })
+
+
 def main():
     # ── Load spatial config ───────────────────
     calibration = CalibrationMap()
@@ -120,6 +181,17 @@ def main():
     parking_type    = PARKING_TYPE
     debug_occupancy = DEBUG_OCCUPANCY
 
+    # ── Shared state for API ─────────────────
+    state = ParkingState()
+    state.zone_map = zones
+    state.calibration = calibration
+    state.route_planner = RoutePlanner(zones)
+    state.slot_recommender = SlotRecommender(zones, calibration)
+
+    # ── Start API server in background thread ─
+    api_thread = threading.Thread(target=_start_api_server, daemon=True)
+    api_thread.start()
+
     with CameraStream() as cam:
         # ── Create fullscreen window before the loop ──
         cv2.namedWindow("Smart Parking System", cv2.WINDOW_NORMAL)
@@ -130,6 +202,7 @@ def main():
         # ── Initial layout (no pinned slots yet — monitor needs time) ──
         occupancy = rebuild_layout(parking_type, zones, calibration,
                                    VEHICLE_DIMS)
+        state.set_occupancy(occupancy)
 
         while True:
             start_time = time.time()
@@ -148,6 +221,10 @@ def main():
             # ── Drop detections in restricted zones ──
             detections = filter_restricted(detections, zones)
 
+            # ── Update shared state for API ───
+            state.update_detections(detections)
+            state.frame_timestamp = datetime.now(timezone.utc).isoformat()
+
             # ── Stopped-car monitor (every frame) ──
             pins_changed = stopped_monitor.update(detections)
             if pins_changed:
@@ -156,9 +233,13 @@ def main():
                       f"→ rebuilding layout")
                 occupancy = rebuild_layout(parking_type, zones, calibration,
                                            VEHICLE_DIMS, pinned)
+                state.set_occupancy(occupancy)
 
             # ── Occupancy update ──────────────
             occupancy.update(detections)
+
+            # ── Check parking events for assigned cars ──
+            _check_parking_events(state, occupancy, detections)
 
             # ── Slot overlay ──────────────────
             if SHOW_SLOTS:
@@ -186,6 +267,7 @@ def main():
                 occupancy = rebuild_layout(
                     parking_type, zones, calibration, VEHICLE_DIMS,
                     stopped_monitor.pinned_slots())
+                state.set_occupancy(occupancy)
             elif key == ord("d") or key == ord("D"):
                 debug_occupancy = not debug_occupancy
                 print(f"[Main] Debug overlay {'ON' if debug_occupancy else 'OFF'}")
