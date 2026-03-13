@@ -2,7 +2,7 @@ from ultralytics import YOLO
 import numpy as np
 
 # Path to the fine-tuned model (trained on real toy car images)
-DEFAULT_MODEL_PATH = "runs/detect/runs/finetune/real_cars_v12/weights/best.pt"
+DEFAULT_MODEL_PATH = "https://github.com/OutLawyer96/Smart_parking/releases/download/v1.0/best.pt"
 
 
 class VehicleDetector:

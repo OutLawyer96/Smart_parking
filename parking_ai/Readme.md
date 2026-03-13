@@ -23,6 +23,12 @@ Real-time vehicle detection, tracking, and zone-based occupancy for a top-down p
    pip install -r requirements.txt
    ```
 
+4. Model weights are hosted on GitHub Releases and loaded by default:
+   ```
+   https://github.com/OutLawyer96/Smart_parking/releases/download/v1.0/best.pt
+   ```
+   No manual model copy is required for normal use.
+
 ---
 
 ## Running the System
@@ -202,8 +208,7 @@ parking_ai/
 │   ├── zones.json               # saved zone definitions
 │   └── calibration.json         # saved homography matrix
 ├── dataset/                     # training data (YOLO format)
-└── runs/detect/train2/          # fine-tuned model weights
-    └── weights/best.pt
+└── model weights                # hosted on GitHub Releases (v1.0/best.pt)
 ```
 
 ---
