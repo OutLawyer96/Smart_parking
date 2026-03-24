@@ -16,6 +16,8 @@ Real-time vehicle detection, tracking, and zone-based occupancy for a top-down p
 
    ```
    venv\Scripts\activate
+
+   source venv/bin/activate
    ```
 
 3. Install dependencies:

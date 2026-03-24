@@ -35,7 +35,9 @@ SLOT_COLORS = {
     "free":     (0,  210,  60),
     "occupied": (0,   50, 220),
     "reserved": (30, 160, 255),
+    "assigned": (0,  255, 255),
 }
+DEFAULT_SLOT_COLOR   = (180, 180, 180)
 DEBUG_OVERLAP_COLOR  = (255, 200,   0)   # cyan-ish for overlap region
 DEBUG_INFLATED_COLOR = (180, 180, 180)   # grey for inflated polygon outline
 
@@ -142,7 +144,7 @@ class OccupancyEngine:
 
         # Filled polygon pass
         for slot in self.slots:
-            color = SLOT_COLORS[slot["status"]]
+            color = SLOT_COLORS.get(slot.get("status"), DEFAULT_SLOT_COLOR)
             pts   = np.array(slot["polygon_px"], dtype=np.int32)
             cv2.fillPoly(overlay, [pts], color)
 
@@ -150,7 +152,7 @@ class OccupancyEngine:
 
         # Outline + label pass
         for slot in self.slots:
-            color = SLOT_COLORS[slot["status"]]
+            color = SLOT_COLORS.get(slot.get("status"), DEFAULT_SLOT_COLOR)
             pts   = np.array(slot["polygon_px"], dtype=np.int32)
             cv2.polylines(frame, [pts], isClosed=True, color=color, thickness=1)
 
@@ -167,7 +169,7 @@ class OccupancyEngine:
                 cx = int(np.mean([p[0] for p in slot["polygon_px"]]))
                 cy = int(np.mean([p[1] for p in slot["polygon_px"]]))
                 label = slot["slot_id"]
-                if slot["status"] == "occupied" and slot["assigned_track_id"] is not None:
+                if slot["status"] in {"occupied", "assigned"} and slot["assigned_track_id"] is not None:
                     label += f" ID:{slot['assigned_track_id']}"
                 if debug:
                     ratio = self._last_overlap.get(slot["slot_id"], 0.0)
@@ -179,9 +181,11 @@ class OccupancyEngine:
     # ── public helpers ────────────────────────────────────────────────────────
 
     def summary(self) -> dict:
-        counts = {"free": 0, "occupied": 0, "reserved": 0, "total": len(self.slots)}
+        counts = {status: 0 for status in SLOT_COLORS}
+        counts["total"] = len(self.slots)
         for slot in self.slots:
-            counts[slot["status"]] += 1
+            status = slot.get("status", "free")
+            counts[status] = counts.get(status, 0) + 1
         return counts
 
     def free_slots(self) -> list[dict]:
