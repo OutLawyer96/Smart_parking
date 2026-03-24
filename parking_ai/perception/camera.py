@@ -1,12 +1,28 @@
+import os
 import cv2
 
-# IP camera stream (phone/Raspberry Pi via DroidCam or similar)
-DEFAULT_STREAM_URL = "http://192.168.4.1/streams"
+# ESP32-CAM streams are commonly exposed as MJPEG URLs on port 81.
+# Override via ESP32_CAM_URL or CAMERA_SOURCE env vars.
+DEFAULT_STREAM_URL = "http://192.168.4.1:81/stream"
+
+
+def _resolve_source(source: str | int | None = None) -> str | int:
+    if source is not None:
+        return source
+
+    env_source = os.getenv("CAMERA_SOURCE") or os.getenv("ESP32_CAM_URL")
+    if not env_source:
+        return DEFAULT_STREAM_URL
+
+    # Allow webcam index via env var (e.g. CAMERA_SOURCE=0)
+    if env_source.isdigit():
+        return int(env_source)
+    return env_source
 
 
 class CameraStream:
-    def __init__(self, source: str = DEFAULT_STREAM_URL):
-        self.source = source
+    def __init__(self, source: str | int | None = None):
+        self.source = _resolve_source(source)
         self.cap = None
 
     def start(self):

@@ -1,6 +1,8 @@
 import cv2
 import time
+import argparse
 from ultralytics import YOLO
+from perception.camera import CameraStream
 
 
 class VehicleDetector:
@@ -29,64 +31,69 @@ class VehicleDetector:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Video detection test")
+    parser.add_argument(
+        "--url",
+        default=None,
+        help="Camera source URL (or webcam index like 0). Defaults to env var/camera.py default.",
+    )
+    args = parser.parse_args()
+
+    source = int(args.url) if args.url is not None and args.url.isdigit() else args.url
+
     model_path = "runs/detect/runs/finetune/real_cars_v12/weights/best.pt"
 
     detector = VehicleDetector(model_path, conf_threshold=0.6)
 
-    cap = cv2.VideoCapture(0)
+    with CameraStream(source=source) as cam:
+        print(f"Reading from: {cam.source}")
+        while True:
+            frame = cam.read()
+            if frame is None:
+                break
 
-    if not cap.isOpened():
-        print("Error: Could not open camera.")
-        return
+            # Resize for consistent inference speed
+            frame_resized = cv2.resize(frame, (640, 640))
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+            start_time = time.time()
 
-        # Resize for consistent inference speed
-        frame_resized = cv2.resize(frame, (640, 640))
+            detections = detector.detect(frame_resized)
 
-        start_time = time.time()
+            end_time = time.time()
+            fps = 1 / (end_time - start_time)
 
-        detections = detector.detect(frame_resized)
+            # Draw detections
+            for det in detections:
+                x1, y1, x2, y2 = det["bbox"]
+                conf = det["confidence"]
 
-        end_time = time.time()
-        fps = 1 / (end_time - start_time)
+                cv2.rectangle(frame_resized, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(
+                    frame_resized,
+                    f"Car {conf:.2f}",
+                    (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2
+                )
 
-        # Draw detections
-        for det in detections:
-            x1, y1, x2, y2 = det["bbox"]
-            conf = det["confidence"]
-
-            cv2.rectangle(frame_resized, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            # Display FPS
             cv2.putText(
                 frame_resized,
-                f"Car {conf:.2f}",
-                (x1, y1 - 10),
+                f"FPS: {fps:.2f}",
+                (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
+                1,
+                (0, 0, 255),
                 2
             )
 
-        # Display FPS
-        cv2.putText(
-            frame_resized,
-            f"FPS: {fps:.2f}",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            2
-        )
+            cv2.imshow("Smart Parking Detection", frame_resized)
 
-        cv2.imshow("Smart Parking Detection", frame_resized)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
-
-    cap.release()
     cv2.destroyAllWindows()
 
 

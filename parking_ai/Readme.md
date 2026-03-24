@@ -21,6 +21,7 @@ Real-time vehicle detection, tracking, and zone-based occupancy for a top-down p
    ```
 
 3. Install dependencies:
+
    ```
    pip install -r requirements.txt
    ```
@@ -34,6 +35,28 @@ Real-time vehicle detection, tracking, and zone-based occupancy for a top-down p
 ---
 
 ## Running the System
+
+### ESP32-CAM setup (recommended now)
+
+1. Flash ESP32-CAM with the CameraWebServer example (Arduino IDE).
+2. In the sketch, set:
+   - `#define CAMERA_MODEL_AI_THINKER`
+   - your Wi-Fi SSID/password
+3. After boot, note the device IP from Serial Monitor.
+4. Use stream URL format:
+   - `http://<esp32-ip>:81/stream`
+5. Set one of these before running the app:
+
+```
+# Windows PowerShell
+$env:ESP32_CAM_URL="http://<esp32-ip>:81/stream"
+
+# or generic source key used by CameraStream
+$env:CAMERA_SOURCE="http://<esp32-ip>:81/stream"
+```
+
+`CameraStream` now defaults to `http://192.168.4.1:81/stream` and also reads
+`ESP32_CAM_URL` / `CAMERA_SOURCE` automatically.
 
 ### Main detection + tracking loop
 
@@ -217,10 +240,47 @@ parking_ai/
 
 ## Updating the Camera URL
 
-If your camera IP changes, edit the `DEFAULT_STREAM_URL` in `perception/camera.py`:
+If your camera IP changes, prefer environment variables:
+
+```
+# Windows PowerShell
+$env:ESP32_CAM_URL="http://<esp32-ip>:81/stream"
+```
+
+or edit the default in `perception/camera.py`:
 
 ```python
-DEFAULT_STREAM_URL = "http://<your-ip>:8080/video"
+DEFAULT_STREAM_URL = "http://<your-ip>:81/stream"
+```
+
+---
+
+## Quick Test: Is ESP32-CAM working?
+
+1. Keep ESP32-CAM powered and connected to the same network as your PC.
+2. In a browser, open:
+
+```
+http://<esp32-ip>
+```
+
+If the page loads, networking is OK.
+
+3. Run the dedicated test script:
+
+```
+python test_esp32_cam.py --url http://<esp32-ip>:81/stream
+```
+
+4. Confirm pass conditions:
+   - A live video window appears.
+   - FPS counter increases.
+   - No repeated "Failed to read frame" messages.
+
+5. Then run the full pipeline:
+
+```
+python main.py
 ```
 
 ---
