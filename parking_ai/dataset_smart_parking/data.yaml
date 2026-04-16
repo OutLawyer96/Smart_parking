@@ -1,0 +1,7 @@
+path: /Users/hitendrasingh/Desktop/smart_parking/parking_ai/dataset_smart_parking
+train: train/images
+val: val/images
+test: test/images
+nc: 1
+names:
+- Car

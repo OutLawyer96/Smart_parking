@@ -43,20 +43,32 @@ Real-time vehicle detection, tracking, and zone-based occupancy for a top-down p
    - `#define CAMERA_MODEL_AI_THINKER`
    - your Wi-Fi SSID/password
 3. After boot, note the device IP from Serial Monitor.
-4. Use stream URL format:
-   - `http://<esp32-ip>:81/stream`
+4. Use capture URL format:
+   - `http://10.54.215.196/capture`
 5. Set one of these before running the app:
 
 ```
 # Windows PowerShell
-$env:ESP32_CAM_URL="http://<esp32-ip>:81/stream"
+$env:ESP32_CAPTURE_URL="http://10.54.215.196/capture"
 
 # or generic source key used by CameraStream
-$env:CAMERA_SOURCE="http://<esp32-ip>:81/stream"
+$env:CAMERA_SOURCE="http://10.54.215.196/capture"
 ```
 
-`CameraStream` now defaults to `http://192.168.4.1:81/stream` and also reads
-`ESP32_CAM_URL` / `CAMERA_SOURCE` automatically.
+`CameraStream` now defaults to `http://10.54.215.196/capture` and also reads
+`ESP32_CAPTURE_URL` / `ESP32_CAM_URL` / `CAMERA_SOURCE` automatically.
+Snapshot polling defaults to `0.3s` per request. You can tune it with:
+
+```
+# Faster updates (more network/CPU load)
+export CAMERA_SNAPSHOT_INTERVAL_S=0.3
+
+# Slower updates (less load)
+export CAMERA_SNAPSHOT_INTERVAL_S=0.5
+
+# Reduce heavy slot-layout recompute churn when tracks jitter
+export LAYOUT_REBUILD_COOLDOWN_S=0.8
+```
 
 ### Main detection + tracking loop
 
@@ -244,13 +256,13 @@ If your camera IP changes, prefer environment variables:
 
 ```
 # Windows PowerShell
-$env:ESP32_CAM_URL="http://<esp32-ip>:81/stream"
+$env:ESP32_CAPTURE_URL="http://10.54.215.196/capture"
 ```
 
 or edit the default in `perception/camera.py`:
 
 ```python
-DEFAULT_STREAM_URL = "http://<your-ip>:81/stream"
+DEFAULT_STREAM_URL = "http://10.54.215.196/capture"
 ```
 
 ---
@@ -269,7 +281,7 @@ If the page loads, networking is OK.
 3. Run the dedicated test script:
 
 ```
-python test_esp32_cam.py --url http://<esp32-ip>:81/stream
+python test_esp32_cam.py --url http://10.54.215.196/capture
 ```
 
 4. Confirm pass conditions:

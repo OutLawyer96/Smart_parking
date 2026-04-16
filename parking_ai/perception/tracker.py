@@ -1,16 +1,18 @@
 from ultralytics import YOLO
+import os
 
-# Path to the fine-tuned model (trained on real toy car images)
-DEFAULT_MODEL_PATH = "https://github.com/OutLawyer96/Smart_parking/releases/download/v1.0/best.pt"
+# Path to the fine-tuned model (trained on the latest local dataset split)
+DEFAULT_MODEL_PATH = "weights/best.pt"
 
 
 class VehicleTracker:
     def __init__(self, model_path: str = DEFAULT_MODEL_PATH, confidence: float = 0.60,
-                 imgsz: int = 640, min_box_area: int = 900):
+                 imgsz: int = 320, min_box_area: int = 900):
         self.model = YOLO(model_path)
-        self.confidence = confidence
-        self.imgsz = imgsz
-        self.min_box_area = min_box_area  # px² — kills tiny false positives (e.g. text labels)
+        self.confidence = float(os.getenv("TRACKER_CONF", str(confidence)))
+        self.imgsz = int(os.getenv("TRACKER_IMGSZ", str(imgsz)))
+        self.min_box_area = int(os.getenv("TRACKER_MIN_BOX_AREA", str(min_box_area)))
+        self.max_det = int(os.getenv("TRACKER_MAX_DET", "12"))
 
         # Custom dataset: single class (0 = car)
         self.vehicle_classes = [0]
@@ -29,6 +31,8 @@ class VehicleTracker:
             conf=self.confidence,
             imgsz=self.imgsz,
             iou=0.4,
+            classes=self.vehicle_classes,
+            max_det=self.max_det,
             verbose=False
         )
 

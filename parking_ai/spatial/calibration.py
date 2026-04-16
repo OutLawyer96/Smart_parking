@@ -31,9 +31,14 @@ import numpy as np
 import os
 import argparse
 import sys
+import requests
+import time
 from typing import Optional
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
-CONFIG_PATH = os.path.join("config", "calibration.json")
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+CONFIG_PATH = os.path.join(_ROOT_DIR, "config", "calibration.json")
+DEFAULT_CAPTURE_URL = "http://10.54.215.196/capture"
 
 _POINT_COLORS = [
     (0, 255, 255),   # 1 — yellow
@@ -42,9 +47,9 @@ _POINT_COLORS = [
     (255, 255, 0),   # 4 — cyan
 ]
 
-_DISPLAY_MAX_W = 1280
-_DISPLAY_MAX_H = 720
-_STATUS_BAR_H = 52
+_DISPLAY_MAX_W = int(os.getenv("DISPLAY_MAX_W", "320"))
+_DISPLAY_MAX_H = int(os.getenv("DISPLAY_MAX_H", "240"))
+_STATUS_BAR_H = int(os.getenv("DISPLAY_STATUS_BAR_H", "42"))
 
 
 # ─────────────────────────────────────────────
@@ -57,8 +62,11 @@ class CalibrationMap:
 
     def __init__(self, config_path: str = CONFIG_PATH):
         self.config_path = config_path
-        self._H: Optional[np.ndarray] = None        # pixel → world
-        self._H_inv: Optional[np.ndarray] = None    # world → pixel
+        self._H: Optional[np.ndarray] = None        # runtime pixel → world
+        self._H_inv: Optional[np.ndarray] = None    # world → runtime pixel
+        self._H_base: Optional[np.ndarray] = None   # source pixel → world
+        self._source_frame_size: Optional[tuple[int, int]] = None  # (w, h)
+        self._runtime_frame_size: Optional[tuple[int, int]] = None  # (w, h)
         self.is_calibrated = False
 
     def load(self, path: Optional[str] = None):
@@ -70,17 +78,100 @@ class CalibrationMap:
         with open(path) as f:
             data = json.load(f)
         H = np.array(data["H"], dtype=np.float64)
-        self._H = H
-        self._H_inv = np.linalg.inv(H)
+        self._H_base = H
+
+        src = data.get("source_frame_size")
+        if isinstance(src, dict) and "width" in src and "height" in src:
+            self._source_frame_size = (int(src["width"]), int(src["height"]))
+        else:
+            self._source_frame_size = None
+            # Optional backward compatibility inference. Disabled by default
+            # because zones can be edited at a different resolution and cause
+            # incorrect scaling of older calibration matrices.
+            if os.getenv("CALIBRATION_INFER_SOURCE_FROM_ZONES", "0") == "1":
+                zones_cfg = os.path.join(_ROOT_DIR, "config", "zones.json")
+                try:
+                    if os.path.exists(zones_cfg):
+                        with open(zones_cfg) as zf:
+                            zdata = json.load(zf)
+                        zsrc = zdata.get("source_frame_size")
+                        if isinstance(zsrc, dict) and "width" in zsrc and "height" in zsrc:
+                            self._source_frame_size = (
+                                int(zsrc["width"]),
+                                int(zsrc["height"]),
+                            )
+                            print(
+                                "[Calibration] source_frame_size missing in calibration; "
+                                f"using zones source size {self._source_frame_size}."
+                            )
+                except Exception:
+                    # Keep None if inference fails.
+                    pass
+            else:
+                print(
+                    "[Calibration] source_frame_size missing in calibration file; "
+                    "not inferring from zones by default."
+                )
+
+        # Default runtime matrix equals saved matrix; can be adapted later.
+        self._H = self._H_base.copy()
+        self._H_inv = np.linalg.inv(self._H)
         self.is_calibrated = True
         print(f"[Calibration] Loaded homography from {path}")
 
-    def save(self, H: np.ndarray, path: Optional[str] = None):
+    def save(
+        self,
+        H: np.ndarray,
+        path: Optional[str] = None,
+        source_frame_size: Optional[tuple[int, int]] = None,
+    ):
         path = path or self.config_path
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        payload = {"H": H.tolist()}
+        if source_frame_size is not None:
+            payload["source_frame_size"] = {
+                "width": int(source_frame_size[0]),
+                "height": int(source_frame_size[1]),
+            }
         with open(path, "w") as f:
-            json.dump({"H": H.tolist()}, f, indent=2)
+            json.dump(payload, f, indent=2)
         print(f"[Calibration] Saved → {path}")
+
+    def set_runtime_frame_size(self, width: int, height: int) -> bool:
+        """
+        Adapt homography for a different runtime frame size than calibration size.
+        Returns True if the active matrix changed.
+        """
+        if self._H_base is None:
+            return False
+
+        runtime = (int(width), int(height))
+        if self._runtime_frame_size == runtime:
+            return False
+        self._runtime_frame_size = runtime
+
+        if self._source_frame_size is None:
+            # Backward compatibility for old calibration files without size metadata.
+            self._H = self._H_base.copy()
+            self._H_inv = np.linalg.inv(self._H)
+            return True
+
+        src_w, src_h = self._source_frame_size
+        run_w, run_h = runtime
+        if run_w <= 0 or run_h <= 0:
+            return False
+
+        sx = float(src_w) / float(run_w)
+        sy = float(src_h) / float(run_h)
+        scale_runtime_to_source = np.array(
+            [[sx, 0.0, 0.0], [0.0, sy, 0.0], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+
+        # world = H_base * source_px = H_base * S * runtime_px
+        self._H = self._H_base @ scale_runtime_to_source
+        self._H_inv = np.linalg.inv(self._H)
+        return True
 
     # ── transforms ───────────────────────────
 
@@ -105,6 +196,26 @@ class CalibrationMap:
 
     def polygon_to_pixel(self, world_polygon: list) -> list:
         return [self.to_pixel(pt) for pt in world_polygon]
+
+    @property
+    def source_frame_size(self) -> Optional[tuple[int, int]]:
+        return self._source_frame_size
+
+    def adopt_source_frame_size(self, width: int, height: int) -> bool:
+        """
+        For legacy calibration files missing source_frame_size, adopt a known
+        source frame size (typically from zones) so runtime scaling can work.
+        Returns True if adopted.
+        """
+        if self._H_base is None or self._source_frame_size is not None:
+            return False
+        w, h = int(width), int(height)
+        if w <= 0 or h <= 0:
+            return False
+        self._source_frame_size = (w, h)
+        self._H = self._H_base.copy()
+        self._H_inv = np.linalg.inv(self._H)
+        return True
 
 
 # ─────────────────────────────────────────────
@@ -168,14 +279,19 @@ class _Calibrator:
         disp = self.frame.copy()
         h, w = disp.shape[:2]
 
+        # Scale circle size for low-resolution frames
+        circle_radius = 3 if w <= 360 else 8
+        circle_outline = 4 if w <= 360 else 11
+        text_scale = 0.35 if w <= 360 else 0.5
+
         # ── completed points
         for i, (px, wd) in enumerate(zip(self.pixel_points, self.world_points)):
             color = _POINT_COLORS[i]
-            cv2.circle(disp, px, 8, color, -1)
-            cv2.circle(disp, px, 11, (255, 255, 255), 2)
+            cv2.circle(disp, px, circle_radius, color, -1)
+            cv2.circle(disp, px, circle_outline, (255, 255, 255), 1)
             label = f"{i+1}  ({wd[0]:.1f},{wd[1]:.1f})cm"
             cv2.putText(disp, label, (px[0] + 13, px[1] + 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, text_scale, color, 1, cv2.LINE_AA)
 
         if self._state == self._ST_VERIFY:
             self._draw_verify(disp)
@@ -194,10 +310,10 @@ class _Calibrator:
         # ── in-progress click dot (ghost)
         if self._state in (self._ST_TYPE_X, self._ST_TYPE_Y):
             px = self.pixel_points[-1]  # the point just clicked
-            cv2.circle(disp, px, 8, self._color, -1)
-            cv2.circle(disp, px, 11, (255, 255, 255), 2)
+            cv2.circle(disp, px, circle_radius, self._color, -1)
+            cv2.circle(disp, px, circle_outline, (255, 255, 255), 1)
             cv2.putText(disp, str(self._point_idx), (px[0] + 13, px[1] + 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, self._color, 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, text_scale + 0.05, self._color, 1)
 
         # ── input box (bottom-centre)
         if self._state in (self._ST_TYPE_X, self._ST_TYPE_Y):
@@ -216,10 +332,12 @@ class _Calibrator:
 
         status = np.zeros((_STATUS_BAR_H, self._display_w, 3), dtype=np.uint8)
         status[:, :] = (28, 28, 28)
+        msg_scale = 0.4 if w <= 360 else 0.55
+        hint_scale = 0.35 if w <= 360 else 0.5
         cv2.putText(status, msg, (10, 23),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, msg_scale, (220, 220, 220), 1, cv2.LINE_AA)
         cv2.putText(status, "Q = quit", (10, 44),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (170, 170, 170), 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, hint_scale, (170, 170, 170), 1, cv2.LINE_AA)
 
         disp = np.vstack([disp, status])
 
@@ -420,14 +538,88 @@ class _Calibrator:
 # ─── entry point ──────────────────────────────
 
 def _grab_frame() -> np.ndarray:
-    from perception.camera import CameraStream
-    print("[calibration] Connecting to camera...")
-    with CameraStream() as cam:
-        for _ in range(10):
-            frame = cam.read()
-    if frame is None:
-        raise RuntimeError("Could not read frame from camera.")
-    return frame
+    base_url = os.getenv("ESP32_CAPTURE_URL") or DEFAULT_CAPTURE_URL
+    print(f"[calibration] Fetching one snapshot from {base_url} ...")
+    require_hq = os.getenv("CALIBRATION_REQUIRE_HQ", "1") == "1"
+    min_w = int(os.getenv("CALIBRATION_MIN_HQ_WIDTH", "640"))
+    min_h = int(os.getenv("CALIBRATION_MIN_HQ_HEIGHT", "480"))
+
+    def _set_query_param(url: str, key: str, value: str) -> str:
+        parsed = urlparse(url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query[key] = value
+        return urlunparse(parsed._replace(query=urlencode(query)))
+
+    def _candidate_urls(url: str) -> list[str]:
+        # Prefer HQ snapshots for calibration because source_frame_size is
+        # persisted and later used for runtime scaling.
+        hq_first = [
+            _set_query_param(url, "mode", "calibration"),
+            _set_query_param(url, "mode", "zone_editor"),
+        ]
+        if require_hq:
+            return hq_first
+        return hq_first + [
+            _set_query_param(url, "mode", "normal"),
+            _set_query_param(url, "mode", "stream"),
+            url,
+        ]
+
+    candidates = _candidate_urls(base_url)
+    last_error = ""
+    saw_busy = False
+    for snap_url in candidates:
+        for attempt in range(3):
+            ts = int(time.time() * 1000)
+            probe_url = f"{snap_url}{'&' if '?' in snap_url else '?'}_ts={ts}"
+            try:
+                requests.get(probe_url, timeout=3.0, headers={"Cache-Control": "no-cache"})
+            except requests.RequestException:
+                pass
+
+            time.sleep(0.14)
+            try:
+                resp = requests.get(
+                    probe_url,
+                    timeout=6.0,
+                    headers={"Cache-Control": "no-cache"},
+                )
+            except requests.RequestException as e:
+                last_error = f"{snap_url} request error: {e}"
+                continue
+
+            if resp.status_code != 200:
+                last_error = f"{snap_url} HTTP {resp.status_code}"
+                if resp.status_code == 503:
+                    saw_busy = True
+                    time.sleep(0.20)
+                continue
+
+            arr = np.frombuffer(resp.content, dtype=np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if frame is None:
+                last_error = f"{snap_url} decode failed"
+                continue
+
+            if require_hq:
+                h, w = frame.shape[:2]
+                if w < min_w or h < min_h:
+                    last_error = (
+                        f"{snap_url} returned low-res frame {w}x{h}; "
+                        f"expected at least {min_w}x{min_h}"
+                    )
+                    continue
+
+            print(f"[calibration] Snapshot received from {snap_url}.")
+            return frame
+
+    if saw_busy:
+        print(
+            "[calibration] ESP32 reported camera busy (HTTP 503) for one or more "
+            "HQ snapshot attempts. This is expected while /stream is active on "
+            "the new firmware."
+        )
+    raise RuntimeError(f"Snapshot request failed after fallbacks. Last error: {last_error}")
 
 
 if __name__ == "__main__":
@@ -453,5 +645,5 @@ if __name__ == "__main__":
 
     if H is not None:
         cal = CalibrationMap()
-        cal.save(H)
+        cal.save(H, source_frame_size=(bg.shape[1], bg.shape[0]))
         print("[calibration] Done. Run main.py to use calibrated layout.")

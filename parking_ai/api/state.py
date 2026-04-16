@@ -52,6 +52,10 @@ class ParkingState:
         # Previous slot states for change detection
         self._prev_slot_status: dict[str, str] = {}
 
+        # Layout version increments when slot IDs/geometry set changes.
+        self._layout_version: int = 0
+        self._pending_full_sync: bool = False
+
         self.frame_timestamp: str = ""
 
     def update_detections(self, detections: list[dict]):
@@ -65,20 +69,37 @@ class ParkingState:
     def set_occupancy(self, engine):
         with self._data_lock:
             self.occupancy_engine = engine
+            if not engine:
+                return
+
+            current_ids = {s["slot_id"] for s in engine.slots}
+            prev_ids = set(self._prev_slot_status.keys())
+
+            # If slot identity changed (re-tiling, pinned-car relayout, mode switch),
+            # frontend should replace previously rendered slots/map.
+            if current_ids != prev_ids:
+                self._layout_version += 1
+                self._pending_full_sync = True
+
             # Detect slot status changes
-            if engine:
-                for slot in engine.slots:
-                    sid = slot["slot_id"]
-                    status = slot["status"]
-                    prev = self._prev_slot_status.get(sid)
-                    if prev and prev != status:
-                        self._pending_slot_updates.append({
-                            "event": "slot_update",
-                            "slot_id": sid,
-                            "status": status,
-                            "tracking_id": slot.get("assigned_track_id"),
-                        })
-                    self._prev_slot_status[sid] = status
+            for slot in engine.slots:
+                sid = slot["slot_id"]
+                status = slot["status"]
+                prev = self._prev_slot_status.get(sid)
+                if prev and prev != status:
+                    self._pending_slot_updates.append({
+                        "event": "slot_update",
+                        "slot_id": sid,
+                        "status": status,
+                        "tracking_id": slot.get("assigned_track_id"),
+                        "layout_version": self._layout_version,
+                    })
+                self._prev_slot_status[sid] = status
+
+            # Remove stale IDs that no longer exist in current layout.
+            stale = prev_ids - current_ids
+            for sid in stale:
+                self._prev_slot_status.pop(sid, None)
 
     def add_assignment(self, tracking_id: int, slot: dict,
                        route: list[dict], vehicle_dims: dict):
@@ -91,6 +112,14 @@ class ParkingState:
                 "assigned_at": time.time(),
                 "status": "navigating",
             }
+            self._pending_events.append({
+                "event": "assignment_update",
+                "tracking_id": tracking_id,
+                "status": "navigating",
+                "assigned_slot": slot.get("slot_id"),
+                "route": route,
+                "layout_version": self._layout_version,
+            })
 
     def get_assignment(self, tracking_id: int) -> Optional[dict]:
         with self._data_lock:
@@ -111,6 +140,12 @@ class ParkingState:
             updates = self._pending_slot_updates
             self._pending_slot_updates = []
             return updates
+
+    def drain_full_sync_needed(self) -> bool:
+        with self._data_lock:
+            needed = self._pending_full_sync
+            self._pending_full_sync = False
+            return needed
 
     def build_world_state(self) -> dict:
         """Build the world_state WS message for all tracked cars."""
@@ -151,6 +186,7 @@ class ParkingState:
             return {
                 "event": "world_state",
                 "timestamp": self.frame_timestamp,
+                "layout_version": self._layout_version,
                 "cars": cars,
             }
 
@@ -222,6 +258,8 @@ class ParkingState:
                 })
 
             return {
+                "event": "map_state",
+                "layout_version": self._layout_version,
                 "map": {
                     "width_px": width_px,
                     "height_px": height_px,
@@ -239,7 +277,7 @@ class ParkingState:
         """Build lightweight slot status list for GET /slots."""
         with self._data_lock:
             if not self.occupancy_engine:
-                return {"slots": []}
+                return {"event": "slots_state", "layout_version": self._layout_version, "slots": []}
             slots = []
             for s in self.occupancy_engine.slots:
                 slots.append({
@@ -247,4 +285,26 @@ class ParkingState:
                     "status": s["status"],
                     "tracking_id": s.get("assigned_track_id"),
                 })
-            return {"slots": slots}
+            return {
+                "event": "slots_state",
+                "layout_version": self._layout_version,
+                "slots": slots,
+            }
+
+    def build_assignments_summary(self) -> dict:
+        """Build assignment snapshot for WS clients."""
+        with self._data_lock:
+            assignments = []
+            for tid, a in self.assignments.items():
+                slot = a.get("slot", {})
+                assignments.append({
+                    "tracking_id": tid,
+                    "status": a.get("status", "navigating"),
+                    "assigned_slot": slot.get("slot_id"),
+                    "route": a.get("route", []),
+                })
+            return {
+                "event": "assignments_state",
+                "layout_version": self._layout_version,
+                "assignments": assignments,
+            }

@@ -62,9 +62,8 @@ _PROFILES = {
 
 # ── Tiling quality ────────────────────────────────────────────────────────────
 # Accept slots whose area mostly lies inside the parking zone.
-# Lowered to 0.55 so slots right at the parking zone edge (against
-# restricted zones) are still accepted — the car can safely park flush
-# there since it only needs to exit toward the drive zone.
+# Keep the threshold permissive enough to maintain slot count while a
+# centroid-in-zone check (below) prevents obvious out-of-zone slots.
 MIN_ZONE_OVERLAP = 0.55
 
 # ── Slot inflation margin (px) — expands slot poly for occupancy tolerance ───
@@ -147,8 +146,14 @@ class LayoutEngine:
             print("[LayoutEngine] No parking zones defined. Draw zones first.")
             return slots
 
-        # Pre-convert drive zones to world coordinates
-        drive_zones = zone_map.zones_by_type("drive")
+        # Use drive/exit orientation hints only for parallel mode.
+        # Open mode intentionally searches orientation-agnostically and the
+        # downstream exit-path filter enforces route feasibility.
+        drive_zones = []
+        if self.parking_type == "parallel":
+            drive_zones = zone_map.zones_by_type("drive")
+            if not drive_zones:
+                drive_zones = zone_map.zones_by_type("exit")
         drive_polys_wld = []
         for dz in drive_zones:
             dz_px = [tuple(p) for p in dz["points"]]
@@ -306,118 +311,207 @@ class LayoutEngine:
 
     def _layout_open(self, poly_world, zone_name, cal, drive_polys,
                      obstacle_polys_px=None):
-        origin, u_hat, v_hat = self._drive_frame(poly_world, drive_polys)
-        u0, u1, v0, v1 = self._local_extent(poly_world, origin, u_hat, v_hat)
         zone_np = np.array(poly_world, dtype=np.float32)
-        v_span = v1 - v0
-        aisle  = self._aisle
+        zone_top_y_px = min(cal.to_pixel(tuple(p))[1] for p in poly_world)
 
-        # --- candidate geometries ------------------------------------
-        # Perpendicular (car width along u, car length along v)
-        sw_p = self._slot_w;  sd_p = self._slot_d
-        # Parallel / rotated (car length along u, car width along v)
-        sw_r = self.car_length * self._slot_w_mult
-        sd_r = self.car_width  * self._slot_d_mult
-        # 45° angled
-        _a_prof = _PROFILES["angled"]
-        theta  = np.radians(45)
-        sin_t, cos_t = np.sin(theta), np.cos(theta)
-        sw_a   = self.car_width  * _a_prof["slot_w_mult"]
-        sd_a   = self.car_length * _a_prof["slot_d_mult"]
-        step_a = sw_a / sin_t
-        shft_a = sd_a * cos_t
-        dep_a  = sd_a * sin_t
+        def _top_gap_score(polys_world):
+            """Smaller is better: how close slots are to the top parking edge."""
+            if not polys_world:
+                return float("inf")
+            min_slot_y = float("inf")
+            for poly_w in polys_world:
+                py = min(cal.to_pixel(tuple(pt))[1] for pt in poly_w)
+                if py < min_slot_y:
+                    min_slot_y = py
+            return max(0.0, float(min_slot_y - zone_top_y_px))
 
-        # --- helpers -------------------------------------------------
-        def _max_rows(depth):
-            """How many rows of `depth` fit in v_span with aisles."""
-            if depth > v_span + 0.5:
-                return 0
-            n = max(1, int((v_span + aisle + 0.5) / (depth + aisle)))
-            while n > 1 and n * depth + (n - 1) * aisle > v_span + 0.5:
-                n -= 1
-            return n
+        def _candidates_for_frame(origin, u_hat, v_hat):
+            u0, u1, v0, v1 = self._local_extent(poly_world, origin, u_hat, v_hat)
+            v_span = v1 - v0
+            aisle = self._aisle
 
-        def _pack_rows_v(depth, n_rows):
-            """Pack n_rows of `depth` flush against v1 toward v0."""
-            rows = []
-            v_cur = v1
-            for _ in range(n_rows):
-                v_start = v_cur - depth
-                if v_start < v0 - 0.5:
-                    break
-                rows.append(v_start)
-                v_cur = v_start - aisle
-            return rows
+            # Candidate geometries
+            sw_p = self._slot_w
+            sd_p = self._slot_d
+            sw_r = self.car_length * self._slot_w_mult
+            sd_r = self.car_width * self._slot_d_mult
 
-        def _tile_row_rect(slot_w, slot_d, v_start):
-            positions = self._spread_positions(u0, u1, slot_w)
-            polys = []
-            for pu in positions:
-                p = self._make_rect(pu, v_start, slot_w, slot_d,
-                                    origin, u_hat, v_hat)
-                if _sufficient_zone_overlap(p, zone_np):
-                    polys.append(p)
-            return polys
+            _a_prof = _PROFILES["angled"]
+            theta = np.radians(45)
+            sin_t, cos_t = np.sin(theta), np.cos(theta)
+            sw_a = self.car_width * _a_prof["slot_w_mult"]
+            sd_a = self.car_length * _a_prof["slot_d_mult"]
+            step_a = sw_a / sin_t
+            shft_a = sd_a * cos_t
+            dep_a = sd_a * sin_t
 
-        def _tile_row_angled(v_start):
-            positions = self._spread_positions(u0, u1 - shft_a, step_a)
-            polys = []
-            for pu in positions:
-                p = [
-                    self._to_world_pt(pu,              v_start,         origin, u_hat, v_hat),
-                    self._to_world_pt(pu + step_a,     v_start,         origin, u_hat, v_hat),
-                    self._to_world_pt(pu + step_a + shft_a, v_start + dep_a, origin, u_hat, v_hat),
-                    self._to_world_pt(pu + shft_a,     v_start + dep_a, origin, u_hat, v_hat),
-                ]
-                if _sufficient_zone_overlap(p, zone_np):
-                    polys.append(p)
-            return polys
+            def _max_rows(depth):
+                if depth > v_span + 0.5:
+                    return 0
+                n = max(1, int((v_span + aisle + 0.5) / (depth + aisle)))
+                while n > 1 and n * depth + (n - 1) * aisle > v_span + 0.5:
+                    n -= 1
+                return n
 
-        # --- evaluate each orientation across the full zone ----------
-        def _generate_perp():
-            rows = _pack_rows_v(sd_p, _max_rows(sd_p))
-            polys = []
-            for rv in rows:
-                polys.extend(_tile_row_rect(sw_p, sd_p, rv))
-            return polys
+            def _pack_rows_v(depth, n_rows):
+                rows = []
+                v_cur = v1
+                for _ in range(n_rows):
+                    v_start = v_cur - depth
+                    if v_start < v0 - 0.5:
+                        break
+                    rows.append(v_start)
+                    v_cur = v_start - aisle
+                return rows
 
-        def _generate_par():
-            rows = _pack_rows_v(sd_r, _max_rows(sd_r))
-            polys = []
-            for rv in rows:
-                polys.extend(_tile_row_rect(sw_r, sd_r, rv))
-            return polys
+            def _row_packings(depth):
+                n_rows = _max_rows(depth)
+                if n_rows <= 0:
+                    return []
 
-        def _generate_ang():
-            rows = _pack_rows_v(dep_a, _max_rows(dep_a))
-            polys = []
-            for rv in rows:
-                polys.extend(_tile_row_angled(rv))
-            return polys
+                packings = []
 
-        candidates = [
-            _generate_perp(),
-            _generate_par(),
-            _generate_ang(),
-        ]
+                rows_far = _pack_rows_v(depth, n_rows)
+                if rows_far:
+                    packings.append(rows_far)
 
-        # In open mode, filter every orientation's candidates against
-        # obstacle polygons (pinned / pre-parked cars) so the winning
-        # orientation is the one that yields the most NON-overlapping
-        # slots across the whole zone — freed aisle areas naturally
-        # become available for alternative orientations.
+                rows_near = []
+                v_cur = v0
+                for _ in range(n_rows):
+                    if v_cur + depth > v1 + 0.5:
+                        break
+                    rows_near.append(v_cur)
+                    v_cur += depth + aisle
+                if rows_near:
+                    packings.append(rows_near)
+
+                total = n_rows * depth + (n_rows - 1) * aisle
+                start = v0 + max((v_span - total) / 2.0, 0.0)
+                rows_center = []
+                for i in range(n_rows):
+                    rv = start + i * (depth + aisle)
+                    if rv + depth <= v1 + 0.5:
+                        rows_center.append(rv)
+                if rows_center:
+                    packings.append(rows_center)
+
+                uniq = []
+                seen = set()
+                for rows in packings:
+                    key = tuple(round(r, 2) for r in rows)
+                    if key not in seen:
+                        uniq.append(rows)
+                        seen.add(key)
+                return uniq
+
+            def _phase_values(step):
+                return [0.0, 0.25 * step, 0.5 * step, 0.75 * step]
+
+            def _tile_row_rect(slot_w, slot_d, v_start, u_shift=0.0, from_left=True):
+                if from_left:
+                    positions = self._spread_positions(u0 + u_shift, u1, slot_w)
+                else:
+                    positions = self._spread_positions(u0, u1 - u_shift, slot_w)
+                polys = []
+                for pu in positions:
+                    p = self._make_rect(pu, v_start, slot_w, slot_d,
+                                        origin, u_hat, v_hat)
+                    if _sufficient_zone_overlap(p, zone_np):
+                        polys.append(p)
+                return polys
+
+            def _tile_row_angled(v_start, u_shift=0.0, direction=1):
+                if direction >= 0:
+                    positions = self._spread_positions(u0 + u_shift, u1 - shft_a, step_a)
+                else:
+                    positions = self._spread_positions(u0 + shft_a + u_shift, u1, step_a)
+
+                polys = []
+                for pu in positions:
+                    if direction >= 0:
+                        p = [
+                            self._to_world_pt(pu,                   v_start,         origin, u_hat, v_hat),
+                            self._to_world_pt(pu + step_a,          v_start,         origin, u_hat, v_hat),
+                            self._to_world_pt(pu + step_a + shft_a, v_start + dep_a, origin, u_hat, v_hat),
+                            self._to_world_pt(pu + shft_a,          v_start + dep_a, origin, u_hat, v_hat),
+                        ]
+                    else:
+                        p = [
+                            self._to_world_pt(pu,                   v_start,         origin, u_hat, v_hat),
+                            self._to_world_pt(pu + step_a,          v_start,         origin, u_hat, v_hat),
+                            self._to_world_pt(pu + step_a - shft_a, v_start + dep_a, origin, u_hat, v_hat),
+                            self._to_world_pt(pu - shft_a,          v_start + dep_a, origin, u_hat, v_hat),
+                        ]
+                    if _sufficient_zone_overlap(p, zone_np):
+                        polys.append(p)
+                return polys
+
+            candidates = []
+
+            for rows in _row_packings(sd_p):
+                for phase in _phase_values(sw_p):
+                    polys_l = []
+                    polys_r = []
+                    for rv in rows:
+                        polys_l.extend(_tile_row_rect(sw_p, sd_p, rv, phase, True))
+                        polys_r.extend(_tile_row_rect(sw_p, sd_p, rv, phase, False))
+                    candidates.append(polys_l)
+                    candidates.append(polys_r)
+
+            for rows in _row_packings(sd_r):
+                for phase in _phase_values(sw_r):
+                    polys_l = []
+                    polys_r = []
+                    for rv in rows:
+                        polys_l.extend(_tile_row_rect(sw_r, sd_r, rv, phase, True))
+                        polys_r.extend(_tile_row_rect(sw_r, sd_r, rv, phase, False))
+                    candidates.append(polys_l)
+                    candidates.append(polys_r)
+
+            for rows in _row_packings(dep_a):
+                for phase in _phase_values(step_a):
+                    for direction in (1, -1):
+                        polys = []
+                        for rv in rows:
+                            polys.extend(_tile_row_angled(rv, phase, direction))
+                        candidates.append(polys)
+
+            return candidates
+
+        # Frame A: drive-aligned frame (existing behavior)
+        origin_a, u_hat_a, v_hat_a = self._drive_frame(poly_world, drive_polys)
+        candidates = _candidates_for_frame(origin_a, u_hat_a, v_hat_a)
+
+        # Frame B: 90°-rotated alternative frame to capture horizontal/vertical
+        # transposed packings that drive-aligned frame can miss.
+        origin_b = origin_a
+        u_hat_b = v_hat_a
+        v_hat_b = -u_hat_a
+        candidates.extend(_candidates_for_frame(origin_b, u_hat_b, v_hat_b))
+
         if obstacle_polys_px:
-            filtered = []
+            candidate_sets = []
             for cand_polys in candidates:
-                kept = [p for p in cand_polys
-                        if not _overlaps_any(
-                            [cal.to_pixel(pt) for pt in p],
-                            obstacle_polys_px)]
-                filtered.append(kept)
-            best_polys = max(filtered, key=len)
+                kept = [
+                    p for p in cand_polys
+                    if not _overlaps_any([cal.to_pixel(pt) for pt in p], obstacle_polys_px)
+                ]
+                candidate_sets.append(kept)
         else:
-            best_polys = max(candidates, key=len)
+            candidate_sets = candidates
+
+        best_polys = []
+        best_count = -1
+        best_gap = float("inf")
+        for cand in candidate_sets:
+            ccount = len(cand)
+            if ccount < best_count:
+                continue
+            cgap = _top_gap_score(cand)
+            if ccount > best_count or cgap < best_gap:
+                best_polys = cand
+                best_count = ccount
+                best_gap = cgap
 
         slots = []
         for i, p in enumerate(best_polys):
@@ -696,6 +790,14 @@ def _sufficient_zone_overlap(slot_poly: list, zone_np: np.ndarray,
     if slot_area == 0:
         return False
     inter_area = float(np.count_nonzero(cv2.bitwise_and(slot_mask, zone_mask)))
+
+    # Reject slots whose centroid is clearly outside the parking zone.
+    # This prevents visually spilled slots even when overlap ratio is marginal.
+    cx = float(np.mean(pts[:, 0]))
+    cy = float(np.mean(pts[:, 1]))
+    if cv2.pointPolygonTest(zone_np, (cx, cy), False) < 0:
+        return False
+
     return (inter_area / slot_area) >= threshold
 
 

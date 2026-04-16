@@ -22,6 +22,7 @@ Debug mode:
 
 import cv2
 import numpy as np
+import os
 
 # ── Temporal thresholds ────────────────────────────────────────────────────
 OCCUPY_FRAMES      = 5      # consecutive frames overlap must be seen
@@ -67,6 +68,17 @@ class OccupancyEngine:
         # Per-frame cache: slot_id → overlap_ratio (filled in update, used in draw)
         self._last_overlap: dict[str, float] = {s["slot_id"]: 0.0 for s in self.slots}
 
+        # Fast reject: inflated slot bounding boxes for quick non-overlap cull.
+        self._slot_bbox = {}
+        for s in self.slots:
+            sid = s["slot_id"]
+            pts = self._slot_polys_inflated[sid]
+            x_min = int(pts[:, 0].min())
+            y_min = int(pts[:, 1].min())
+            x_max = int(pts[:, 0].max())
+            y_max = int(pts[:, 1].max())
+            self._slot_bbox[sid] = (x_min, y_min, x_max, y_max)
+
     # ── update ────────────────────────────────────────────────────────────────
 
     def update(self, detections: list[dict]) -> None:
@@ -85,6 +97,11 @@ class OccupancyEngine:
             row: dict[str, float] = {}
             for slot in self.slots:
                 sid   = slot["slot_id"]
+                sx1, sy1, sx2, sy2 = self._slot_bbox[sid]
+                # AABB reject before any rasterization work.
+                if x2 < sx1 or x1 > sx2 or y2 < sy1 or y1 > sy2:
+                    row[sid] = 0.0
+                    continue
                 ratio = _overlap_ratio(car_poly, self._slot_polys_inflated[sid],
                                        slot["slot_area_px"])
                 row[sid] = ratio
@@ -141,20 +158,33 @@ class OccupancyEngine:
                 region in a distinct colour.
         """
         overlay = frame.copy()
+        h, w = frame.shape[:2]
+        fill_free = os.getenv("SLOT_FILL_FREE", "0") == "1"
+        
+        # Increase visibility at low resolution
+        alpha = 0.40 if w <= 360 else 0.35
+        thickness = 1 if w <= 360 else 1
+        label_scale = 0.30 if w <= 360 else 0.38
 
         # Filled polygon pass
+        filled_any = False
         for slot in self.slots:
+            status = slot.get("status", "free")
+            if status == "free" and not fill_free:
+                continue
             color = SLOT_COLORS.get(slot.get("status"), DEFAULT_SLOT_COLOR)
             pts   = np.array(slot["polygon_px"], dtype=np.int32)
             cv2.fillPoly(overlay, [pts], color)
+            filled_any = True
 
-        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+        if filled_any:
+            cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
         # Outline + label pass
         for slot in self.slots:
             color = SLOT_COLORS.get(slot.get("status"), DEFAULT_SLOT_COLOR)
             pts   = np.array(slot["polygon_px"], dtype=np.int32)
-            cv2.polylines(frame, [pts], isClosed=True, color=color, thickness=1)
+            cv2.polylines(frame, [pts], isClosed=True, color=color, thickness=thickness)
 
             if debug:
                 # Draw inflated polygon in grey
@@ -174,7 +204,7 @@ class OccupancyEngine:
                 if debug:
                     ratio = self._last_overlap.get(slot["slot_id"], 0.0)
                     label += f" {ratio*100:.0f}%"
-                _put_label(frame, label, (cx, cy), color)
+                _put_label(frame, label, (cx, cy), color, scale=label_scale)
 
         return frame
 
@@ -228,10 +258,10 @@ def _overlap_ratio(car_poly: np.ndarray, slot_poly: np.ndarray,
     return inter / slot_area_px
 
 
-def _put_label(frame, text, center, color):
-    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+def _put_label(frame, text, center, color, scale=0.38):
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
     cx, cy = center
     cv2.rectangle(frame, (cx - tw//2 - 2, cy - th - 2),
                   (cx + tw//2 + 2, cy + 2), (0, 0, 0), -1)
     cv2.putText(frame, text, (cx - tw//2, cy),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)
+                cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)

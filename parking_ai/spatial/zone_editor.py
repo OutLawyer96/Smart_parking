@@ -22,6 +22,9 @@ import numpy as np
 import os
 import argparse
 import sys
+import requests
+import time
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 # Zone type definitions
 ZONE_TYPES = ["parking", "drive", "restricted", "exit"]
@@ -34,7 +37,9 @@ ZONE_COLORS = {
 }
 
 FILL_ALPHA = 0.30   # how transparent the polygon fill is
-CONFIG_PATH = os.path.join("config", "zones.json")
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+CONFIG_PATH = os.path.join(_ROOT_DIR, "config", "zones.json")
+DEFAULT_CAPTURE_URL = "http://10.54.215.196/capture"
 
 
 # ─────────────────────────────────────────────
@@ -95,6 +100,10 @@ class ZoneEditor:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         data = {
             "unlabeled_is_restricted": True,
+            "source_frame_size": {
+                "width": int(self.background.shape[1]),
+                "height": int(self.background.shape[0]),
+            },
             "zones": [
                 {
                     "id":     z["id"],
@@ -221,49 +230,48 @@ class ZoneEditor:
 
     def _draw_hud(self, frame: np.ndarray):
         h, w = frame.shape[:2]
-        panel_w = 260
+        panel_w = max(150, min(220, int(w * 0.58)))
         panel = np.zeros((h, panel_w, 3), dtype=np.uint8)
         panel[:] = (30, 30, 30)
 
+        compact = w <= 360
+        head_scale = 0.45 if compact else 0.55
+        text_scale = 0.35 if compact else 0.45
+        row_h = 17 if compact else 22
+
         color = ZONE_COLORS[self.current_type]
         lines = [
-            ("ZONE EDITOR",      (200, 200, 200), 0.55, 2),
-            ("",                 None,            0.4,  1),
-            (f"Type: {self.current_type}", color, 0.55, 2),
-            (f"Vertices: {len(self.current_points)}", (200, 200, 200), 0.45, 1),
-            (f"Zones: {len(self.zones)}",             (200, 200, 200), 0.45, 1),
-            ("",                 None,            0.4,  1),
-            ("── LEGEND ──",     (160, 160, 160), 0.45, 1),
+            ("ZONE EDITOR",      (200, 200, 200), head_scale, 1 if compact else 2),
+            ("",                 None,            text_scale, 1),
+            (f"Type: {self.current_type}", color, head_scale, 1 if compact else 2),
+            (f"Vertices: {len(self.current_points)}", (200, 200, 200), text_scale, 1),
+            (f"Zones: {len(self.zones)}",             (200, 200, 200), text_scale, 1),
+            ("",                 None,            text_scale, 1),
+            ("LEGEND",           (160, 160, 160), text_scale, 1),
         ]
         for zt in ZONE_TYPES:
-            lines.append((f"  {zt}", ZONE_COLORS[zt], 0.45, 1))
+            lines.append((f"- {zt}", ZONE_COLORS[zt], text_scale, 1))
 
         lines += [
-            ("",              None,            0.4, 1),
-            ("── CONTROLS ──", (160, 160, 160), 0.45, 1),
-            ("[T]  cycle type",     (180, 180, 180), 0.4, 1),
-            ("[C]  close zone",     (180, 180, 180), 0.4, 1),
-            ("[Z]  undo vertex",    (180, 180, 180), 0.4, 1),
-            ("[D]  delete last",    (180, 180, 180), 0.4, 1),
-            ("[R]  rename last",    (180, 180, 180), 0.4, 1),
-            ("[S]  save",           (180, 180, 180), 0.4, 1),
-            ("[Q]  save & quit",    (180, 180, 180), 0.4, 1),
+            ("",              None,            text_scale, 1),
+            ("CONTROLS",      (160, 160, 160), text_scale, 1),
+            ("[T] type",      (180, 180, 180), text_scale, 1),
+            ("[C] close",     (180, 180, 180), text_scale, 1),
+            ("[Z] undo",      (180, 180, 180), text_scale, 1),
+            ("[D] delete",    (180, 180, 180), text_scale, 1),
+            ("[R] rename",    (180, 180, 180), text_scale, 1),
+            ("[S] save",      (180, 180, 180), text_scale, 1),
+            ("[Q] save+quit", (180, 180, 180), text_scale, 1),
         ]
 
-        y = 24
+        y = 20 if compact else 24
         for text, col, scale, thickness in lines:
             if text and col:
-                cv2.putText(panel, text, (10, y),
+                cv2.putText(panel, text, (8, y),
                             cv2.FONT_HERSHEY_SIMPLEX, scale, col, thickness)
-            y += 22
+            y += row_h
 
-        combined = np.hstack([frame, panel])
-        frame[:] = combined[:h, :w]
-        # paste panel beside frame
-        frame_with_hud = np.hstack([frame, panel])
-        frame[:, :] = frame_with_hud[:h, :w]
-
-        # actually just write to a wider display — handled in run()
+        # Panel is appended in run(); keep frame geometry untouched.
         self._last_panel = panel
 
     # ── main loop ────────────────────────────
@@ -272,9 +280,13 @@ class ZoneEditor:
         cv2.namedWindow(self._win, cv2.WINDOW_NORMAL)
         cv2.setMouseCallback(self._win, self._mouse_cb)
 
+        first = True
         while True:
             frame = self._draw()
             display = np.hstack([frame, self._last_panel]) if hasattr(self, "_last_panel") else frame
+            if first:
+                cv2.resizeWindow(self._win, display.shape[1], display.shape[0])
+                first = False
             cv2.imshow(self._win, display)
 
             key = cv2.waitKey(30) & 0xFF
@@ -323,15 +335,89 @@ def _put_label(frame, text, center, color):
 # ─── entry point ──────────────────────────────
 
 def _grab_frame_from_camera() -> np.ndarray:
-    from perception.camera import CameraStream
-    print("[editor] Connecting to camera to capture background frame...")
-    with CameraStream() as cam:
-        for _ in range(10):          # skip first few frames (auto-exposure settle)
-            frame = cam.read()
-        if frame is None:
-            raise RuntimeError("Could not read frame from camera.")
-    print("[editor] Frame captured.")
-    return frame
+    base_url = os.getenv("ESP32_CAPTURE_URL") or DEFAULT_CAPTURE_URL
+    print(f"[editor] Fetching one snapshot from {base_url} for background...")
+    require_hq = os.getenv("ZONE_EDITOR_REQUIRE_HQ", "1") == "1"
+    min_w = int(os.getenv("ZONE_EDITOR_MIN_HQ_WIDTH", "640"))
+    min_h = int(os.getenv("ZONE_EDITOR_MIN_HQ_HEIGHT", "480"))
+
+    def _set_query_param(url: str, key: str, value: str) -> str:
+        parsed = urlparse(url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query[key] = value
+        return urlunparse(parsed._replace(query=urlencode(query)))
+
+    def _candidate_urls(url: str) -> list[str]:
+        # Prefer HQ snapshots because zones source_frame_size is persisted and
+        # used to scale zones onto runtime low-res streams.
+        hq_first = [
+            _set_query_param(url, "mode", "zone_editor"),
+            _set_query_param(url, "mode", "calibration"),
+        ]
+        if require_hq:
+            return hq_first
+        return hq_first + [
+            _set_query_param(url, "mode", "normal"),
+            _set_query_param(url, "mode", "stream"),
+            url,
+        ]
+
+    candidates = _candidate_urls(base_url)
+    last_error = ""
+    saw_busy = False
+    for snap_url in candidates:
+        for attempt in range(3):
+            ts = int(time.time() * 1000)
+            probe_url = f"{snap_url}{'&' if '?' in snap_url else '?'}_ts={ts}"
+            try:
+                # Warm-up call helps mode changes settle before actual decode.
+                requests.get(probe_url, timeout=3.0, headers={"Cache-Control": "no-cache"})
+            except requests.RequestException:
+                pass
+
+            time.sleep(0.14)
+            try:
+                resp = requests.get(
+                    probe_url,
+                    timeout=6.0,
+                    headers={"Cache-Control": "no-cache"},
+                )
+            except requests.RequestException as e:
+                last_error = f"{snap_url} request error: {e}"
+                continue
+
+            if resp.status_code != 200:
+                last_error = f"{snap_url} HTTP {resp.status_code}"
+                if resp.status_code == 503:
+                    saw_busy = True
+                    time.sleep(0.20)
+                continue
+
+            arr = np.frombuffer(resp.content, dtype=np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if frame is None:
+                last_error = f"{snap_url} decode failed"
+                continue
+
+            if require_hq:
+                h, w = frame.shape[:2]
+                if w < min_w or h < min_h:
+                    last_error = (
+                        f"{snap_url} returned low-res frame {w}x{h}; "
+                        f"expected at least {min_w}x{min_h}"
+                    )
+                    continue
+
+            print(f"[editor] Frame captured from {snap_url}.")
+            return frame
+
+    if saw_busy:
+        print(
+            "[editor] ESP32 reported camera busy (HTTP 503) for one or more "
+            "HQ snapshot attempts. This is expected while /stream is active on "
+            "the new firmware."
+        )
+    raise RuntimeError(f"Snapshot request failed after fallbacks. Last error: {last_error}")
 
 
 if __name__ == "__main__":

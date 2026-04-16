@@ -28,9 +28,10 @@ Pinned slots:
 import cv2
 import numpy as np
 from collections import deque
+import os
 
 # ── Grid resolution (pixels per cell) ─────────────────────────────────────
-GRID_RES = 10
+GRID_RES = max(4, int(os.getenv("EXIT_PATH_GRID_RES", "10")))
 
 # ── Cell types ─────────────────────────────────────────────────────────────
 CELL_BLOCKED  = 0   # restricted / outside all zones
@@ -50,6 +51,7 @@ _MAX_CORRIDOR = 8
 
 # ── Default car width in pixels (used if not supplied) ────────────────────
 _DEFAULT_CAR_WIDTH_PX = 40
+_ROW_BAND_PX = int(os.getenv("EXIT_PATH_ROW_BAND_PX", "24"))
 
 
 # ─── public API ──────────────────────────────────────────────────────────────
@@ -123,6 +125,7 @@ def filter_slots_by_exit_path(slots, zone_map, car_width_px=None):
 
     # ── Slot adjacency ───────────────────────────────────────────────
     adjacency = _build_slot_adjacency(slot_cells)
+    row_groups = _build_row_groups(working_slots, band_px=_ROW_BAND_PX)
 
     # ── Greedy corridor sacrifice loop ───────────────────────────────
     active = set(range(len(working_slots)))
@@ -135,15 +138,27 @@ def filter_slots_by_exit_path(slots, zone_map, car_width_px=None):
         if not unreachable:
             break
 
+        removable_active = active - pinned
+        if not removable_active:
+            # Nothing removable left (only pinned slots remain).
+            break
+
+        # Prioritise candidates near the current blockage frontier.
+        frontier = {
+            i for i in removable_active
+            if (i in reachable) or any(n in unreachable for n in adjacency.get(i, set()))
+        }
+        if not frontier:
+            frontier = set(removable_active)
+
         # ── Find best corridor to sacrifice ──────────────────────────
         best_corridor = None
         best_net      = 0
         best_avg_dist = float("inf")
-
-        removable_reachable = reachable - pinned
+        best_frag     = float("inf")
 
         # 1) Single slot sacrifices
-        for candidate in removable_reachable:
+        for candidate in frontier:
             trial = active - {candidate}
             _, trial_unreach = _eval_reachability_wide(
                 trial, slot_cells, base_grid, grid_h, grid_w, erode_cells
@@ -151,17 +166,22 @@ def filter_slots_by_exit_path(slots, zone_map, car_width_px=None):
             newly_reached = len(unreachable) - len(trial_unreach)
             net = newly_reached - 1
             avg_d = exit_dist[candidate]
+            frag = _row_fragmentation_score(trial, row_groups)
 
             if (net > best_net
-                    or (net == best_net and net > 0 and avg_d < best_avg_dist)):
+                    or (net == best_net and net > 0 and (
+                        frag < best_frag
+                        or (frag == best_frag and avg_d < best_avg_dist)
+                    ))):
                 best_net      = net
                 best_corridor = {candidate}
                 best_avg_dist = avg_d
+                best_frag     = frag
 
         # 2) Multi-slot corridors
-        for start in removable_reachable:
+        for start in frontier:
             corridors = _find_corridors(
-                start, removable_reachable, adjacency, _MAX_CORRIDOR
+                start, frontier, adjacency, _MAX_CORRIDOR
             )
             for corridor in corridors:
                 if len(corridor) <= 1:
@@ -173,19 +193,51 @@ def filter_slots_by_exit_path(slots, zone_map, car_width_px=None):
                 newly_reached = len(unreachable) - len(trial_unreach)
                 net = newly_reached - len(corridor)
                 avg_d = sum(exit_dist[i] for i in corridor) / len(corridor)
+                frag = _row_fragmentation_score(trial, row_groups)
 
                 if (net > best_net
-                        or (net == best_net and net > 0
-                            and avg_d < best_avg_dist)):
+                        or (net == best_net and net > 0 and (
+                            frag < best_frag
+                            or (frag == best_frag and avg_d < best_avg_dist)
+                        ))):
                     best_net      = net
                     best_corridor = corridor
                     best_avg_dist = avg_d
+                    best_frag     = frag
 
         if best_net > 0 and best_corridor:
             active -= best_corridor
         else:
-            active -= unreachable
-            break
+            # No positive-gain corridor found. Remove the single least-harmful
+            # blocker and iterate again instead of dropping all unreachable.
+            best_single = None
+            best_unreach_count = float("inf")
+            best_single_frag = float("inf")
+            best_single_dist = float("-inf")
+
+            for candidate in frontier:
+                trial = active - {candidate}
+                _, trial_unreach = _eval_reachability_wide(
+                    trial, slot_cells, base_grid, grid_h, grid_w, erode_cells
+                )
+                ucount = len(trial_unreach)
+                frag = _row_fragmentation_score(trial, row_groups)
+                # Tie-break: prefer removing slots farther from exit first.
+                cdist = exit_dist[candidate]
+                if (ucount < best_unreach_count
+                        or (ucount == best_unreach_count and (
+                            frag < best_single_frag
+                            or (frag == best_single_frag and cdist > best_single_dist)
+                        ))):
+                    best_unreach_count = ucount
+                    best_single_frag = frag
+                    best_single_dist = cdist
+                    best_single = candidate
+
+            if best_single is None:
+                break
+
+            active.remove(best_single)
 
     filtered = [working_slots[i] for i in sorted(active)]
 
@@ -240,6 +292,72 @@ def _find_corridors(start, removable, adjacency, max_depth):
                     queue.append((new_path, nbr))
 
     return corridors
+
+
+def _build_row_groups(slots, band_px):
+    """Cluster slot indices into approximate rows using centroid y bands."""
+    if not slots:
+        return []
+    centers = []
+    for i, s in enumerate(slots):
+        cx = float(np.mean([p[0] for p in s["polygon_px"]]))
+        cy = float(np.mean([p[1] for p in s["polygon_px"]]))
+        centers.append((i, cx, cy))
+    centers.sort(key=lambda t: t[2])
+
+    rows = []
+    row_means = []
+    for idx, cx, cy in centers:
+        placed = False
+        for r_i, mean_y in enumerate(row_means):
+            if abs(cy - mean_y) <= band_px:
+                rows[r_i].append((idx, cx, cy))
+                vals = [v[2] for v in rows[r_i]]
+                row_means[r_i] = float(sum(vals) / len(vals))
+                placed = True
+                break
+        if not placed:
+            rows.append([(idx, cx, cy)])
+            row_means.append(cy)
+
+    # Keep slots ordered left-to-right inside each row.
+    return [
+        [idx for idx, _, _ in sorted(r, key=lambda t: t[1])]
+        for r in rows
+    ]
+
+
+def _row_fragmentation_score(active, row_groups):
+    """
+    Lower is better: penalise holes/splits in each row to preserve continuity.
+    """
+    score = 0
+    for row in row_groups:
+        if len(row) <= 1:
+            continue
+        present = [1 if i in active else 0 for i in row]
+        first = None
+        last = None
+        for i, v in enumerate(present):
+            if v:
+                if first is None:
+                    first = i
+                last = i
+        if first is None or last is None or first == last:
+            continue
+        # Internal holes between kept endpoints are heavily penalised.
+        score += sum(1 for v in present[first:last + 1] if v == 0)
+
+        # Additional mild penalty for multiple kept segments.
+        seg = 0
+        prev = 0
+        for v in present:
+            if v and not prev:
+                seg += 1
+            prev = v
+        if seg > 1:
+            score += (seg - 1)
+    return score
 
 
 # ─── wide-path reachability ──────────────────────────────────────────────
