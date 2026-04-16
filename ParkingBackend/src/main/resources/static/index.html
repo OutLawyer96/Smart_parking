@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Parking System - Real-time Navigation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+            max-width: 1200px;
+            width: 100%;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            padding: 30px;
+        }
+
+        .canvas-section, .data-section {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .canvas-section h2, .data-section h2 {
+            font-size: 1.5em;
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        #parkingCanvas {
+            border: 2px solid #667eea;
+            background: #f9f9f9;
+            border-radius: 8px;
+            display: block;
+            margin-bottom: 15px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        button {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 6px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn-connect {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-connect:hover:not(:disabled) {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-disconnect {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .btn-disconnect:hover:not(:disabled) {
+            background: #c0392b;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(231, 76, 60, 0.4);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .status-section {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #ddd;
+        }
+
+        .status-item:last-child {
+            border-bottom: none;
+        }
+
+        .status-label {
+            font-weight: 600;
+            color: #555;
+        }
+
+        .status-value {
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .status-value.connected {
+            color: #27ae60;
+        }
+
+        .status-value.disconnected {
+            color: #e74c3c;
+        }
+
+        .data-display {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 8px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .data-display pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            color: #333;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+
+        .status-indicator.online {
+            background: #27ae60;
+        }
+
+        .status-indicator.offline {
+            background: #e74c3c;
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .content {
+                grid-template-columns: 1fr;
+            }
+
+            .header h1 {
+                font-size: 1.8em;
+            }
+
+            .controls {
+                flex-direction: column;
+            }
+        }
+
+        .console {
+            background: #1e1e1e;
+            color: #00ff00;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85em;
+            max-height: 200px;
+            overflow-y: auto;
+            line-height: 1.4;
+        }
+
+        .console-line {
+            padding: 2px 0;
+        }
+
+        .console-line.error {
+            color: #ff6b6b;
+        }
+
+        .console-line.success {
+            color: #51cf66;
+        }
+
+        .console-line.info {
+            color: #74c0fc;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🅿️ Smart Parking System</h1>
+            <p>Real-time Autonomous Parking Navigation</p>
+        </div>
+
+        <div class="content">
+            <div class="canvas-section">
+                <h2>Parking Area Visualization</h2>
+                <canvas id="parkingCanvas" width="400" height="700"></canvas>
+
+                <div class="controls">
+                    <button id="connectBtn" class="btn-connect" onclick="connect()">
+                        Connect to Server
+                    </button>
+                    <button id="disconnectBtn" class="btn-disconnect" onclick="disconnect()" disabled>
+                        Disconnect
+                    </button>
+                </div>
+
+                <div class="console" id="console"></div>
+            </div>
+
+            <div class="data-section">
+                <h2>Live Data Stream</h2>
+
+                <div class="status-section">
+                    <div class="status-item">
+                        <span class="status-label">Connection Status</span>
+                        <span class="status-value disconnected">
+                            <span class="status-indicator offline"></span>
+                            Disconnected
+                        </span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">WebSocket URL</span>
+                        <span class="status-value" id="wsUrl">ws://localhost:8080/ws/parking</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">Last Update</span>
+                        <span class="status-value" id="lastUpdate">-</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">Messages Received</span>
+                        <span class="status-value" id="messageCount">0</span>
+                    </div>
+                </div>
+
+                <h3 style="margin-top: 20px; margin-bottom: 10px;">Current Data</h3>
+                <div class="data-display">
+                    <pre id="dataDisplay">{
+  "path": [],
+  "obstacles": [],
+  "targetSlot": {}
+}</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let messageCount = 0;
+        const canvas = document.getElementById('parkingCanvas');
+        const ctx = canvas.getContext('2d');
+        let currentData = null;
+
+        function log(message, type = 'info') {
+            const console = document.getElementById('console');
+            const line = document.createElement('div');
+            line.className = `console-line ${type}`;
+            const timestamp = new Date().toLocaleTimeString();
+            line.textContent = `[${timestamp}] ${message}`;
+            console.appendChild(line);
+            console.scrollTop = console.scrollHeight;
+        }
+
+        function updateStatus(connected) {
+            const statusValue = document.querySelector('.status-value');
+            const indicator = document.querySelector('.status-indicator');
+
+            if (connected) {
+                statusValue.textContent = '';
+                statusValue.className = 'status-value connected';
+                indicator.className = 'status-indicator online';
+                statusValue.innerHTML = '<span class="status-indicator online"></span>Connected';
+            } else {
+                statusValue.textContent = '';
+                statusValue.className = 'status-value disconnected';
+                indicator.className = 'status-indicator offline';
+                statusValue.innerHTML = '<span class="status-indicator offline"></span>Disconnected';
+            }
+        }
+
+        function connect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log('Already connected', 'info');
+                return;
+            }
+
+            ws = new WebSocket('ws://localhost:8080/ws/parking');
+
+            ws.onopen = function () {
+                log('Connected to server', 'success');
+                updateStatus(true);
+                document.getElementById('connectBtn').disabled = true;
+                document.getElementById('disconnectBtn').disabled = false;
+            };
+
+            ws.onmessage = function (event) {
+                try {
+                    currentData = JSON.parse(event.data);
+                    messageCount++;
+                    document.getElementById('messageCount').textContent = messageCount;
+                    document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+                    document.getElementById('dataDisplay').textContent = JSON.stringify(currentData, null, 2);
+                    drawParking(currentData);
+                } catch (e) {
+                    log(`Error parsing message: ${e.message}`, 'error');
+                }
+            };
+
+            ws.onerror = function (error) {
+                log(`WebSocket error: ${error}`, 'error');
+                updateStatus(false);
+            };
+
+            ws.onclose = function () {
+                log('Disconnected from server', 'error');
+                updateStatus(false);
+                document.getElementById('connectBtn').disabled = false;
+                document.getElementById('disconnectBtn').disabled = true;
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function drawParking(data) {
+            if (!data) return;
+
+            // Clear canvas
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw grid
+            ctx.strokeStyle = '#e0e0e0';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < canvas.width; i += 50) {
+                ctx.beginPath();
+                ctx.moveTo(i, 0);
+                ctx.lineTo(i, canvas.height);
+                ctx.stroke();
+            }
+            for (let i = 0; i < canvas.height; i += 50) {
+                ctx.beginPath();
+                ctx.moveTo(0, i);
+                ctx.lineTo(canvas.width, i);
+                ctx.stroke();
+            }
+
+            // Draw obstacles
+            if (data.obstacles) {
+                data.obstacles.forEach(obstacle => {
+                    const rect = obstacle.rect;
+                    ctx.fillStyle = obstacle.isDynamic ? 'rgba(255, 107, 107, 0.6)' : 'rgba(100, 100, 100, 0.8)';
+                    ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+                    ctx.strokeStyle = obstacle.isDynamic ? '#e74c3c' : '#333';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+
+                    // Draw ID
+                    ctx.fillStyle = '#fff';
+                    ctx.font = 'bold 10px Arial';
+                    ctx.fillText(obstacle.id, rect.x + 5, rect.y + 15);
+                });
+            }
+
+            // Draw target slot
+            if (data.targetSlot) {
+                const target = data.targetSlot;
+                ctx.fillStyle = 'rgba(39, 174, 96, 0.3)';
+                ctx.fillRect(target.x, target.y, target.width, target.length);
+                ctx.strokeStyle = '#27ae60';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(target.x, target.y, target.width, target.length);
+                ctx.fillStyle = '#27ae60';
+                ctx.font = 'bold 12px Arial';
+                ctx.fillText('TARGET SLOT', target.x + 10, target.y + 20);
+            }
+
+            // Draw path
+            if (data.path && data.path.length > 0) {
+                ctx.strokeStyle = '#667eea';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(data.path[0].x, data.path[0].y);
+
+                for (let i = 1; i < data.path.length; i++) {
+                    ctx.lineTo(data.path[i].x, data.path[i].y);
+                }
+                ctx.stroke();
+
+                // Draw path points
+                data.path.forEach((point, index) => {
+                    ctx.fillStyle = index === 0 ? '#667eea' : '#764ba2';
+                    ctx.beginPath();
+                    ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    if (index === data.path.length - 1) {
+                        ctx.strokeStyle = '#667eea';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.arc(point.x, point.y, 10, 0, Math.PI * 2);
+                        ctx.stroke();
+                    }
+                });
+            }
+        }
+
+        // Initialize
+        window.addEventListener('load', function () {
+            log('Page loaded. Click "Connect to Server" to start', 'info');
+            drawParking(null);
+        });
+
+        window.addEventListener('beforeunload', function () {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close();
+            }
+        });
+    </script>
+</body>
+</html>
+

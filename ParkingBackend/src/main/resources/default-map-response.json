@@ -1,0 +1,159 @@
+{
+  "map": {
+    "width_px": 395,
+    "height_px": 463,
+    "scale_m_per_px": 0.001102,
+    "layers": {
+      "parking_slots": [
+        {
+          "slot_id": "parking_0_S00",
+          "cx": 70,
+          "cy": 420,
+          "polygon": [[115, 443], [114, 401], [26, 399], [26, 440]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S01",
+          "cx": 70,
+          "cy": 378,
+          "polygon": [[114, 400], [114, 358], [26, 357], [26, 398]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S02",
+          "cx": 70,
+          "cy": 336,
+          "polygon": [[114, 357], [114, 316], [26, 315], [26, 356]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S03",
+          "cx": 70,
+          "cy": 294,
+          "polygon": [[114, 315], [114, 274], [26, 274], [26, 315]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S04",
+          "cx": 70,
+          "cy": 252,
+          "polygon": [[114, 273], [114, 232], [26, 233], [26, 273]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S05",
+          "cx": 69,
+          "cy": 211,
+          "polygon": [[114, 231], [113, 190], [26, 192], [26, 232]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S06",
+          "cx": 69,
+          "cy": 169,
+          "polygon": [[113, 189], [113, 148], [26, 151], [26, 191]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S07",
+          "cx": 69,
+          "cy": 128,
+          "polygon": [[113, 148], [113, 107], [26, 110], [26, 150]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S08",
+          "cx": 69,
+          "cy": 87,
+          "polygon": [[113, 106], [113, 66], [26, 70], [26, 109]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S09",
+          "cx": 69,
+          "cy": 47,
+          "polygon": [[113, 65], [113, 25], [27, 29], [26, 69]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S11",
+          "cx": 206,
+          "cy": 380,
+          "polygon": [[253, 403], [252, 360], [159, 359], [160, 401]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S12",
+          "cx": 205,
+          "cy": 337,
+          "polygon": [[252, 359], [252, 317], [159, 316], [159, 358]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S13",
+          "cx": 205,
+          "cy": 294,
+          "polygon": [[252, 316], [251, 273], [159, 273], [159, 315]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S14",
+          "cx": 204,
+          "cy": 251,
+          "polygon": [[251, 272], [250, 230], [158, 231], [159, 273]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S15",
+          "cx": 204,
+          "cy": 208,
+          "polygon": [[250, 229], [250, 187], [158, 189], [158, 230]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S16",
+          "cx": 203,
+          "cy": 166,
+          "polygon": [[250, 186], [249, 144], [158, 147], [158, 188]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S17",
+          "cx": 203,
+          "cy": 124,
+          "polygon": [[249, 144], [249, 102], [157, 105], [158, 146]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S18",
+          "cx": 202,
+          "cy": 82,
+          "polygon": [[249, 101], [248, 60], [157, 64], [157, 104]],
+          "status": "free"
+        },
+        {
+          "slot_id": "parking_0_S19",
+          "cx": 202,
+          "cy": 40,
+          "polygon": [[248, 59], [248, 18], [157, 22], [157, 63]],
+          "status": "free"
+        }
+      ],
+      "restricted_zones": [],
+      "entry_exit": [
+        {
+          "id": "zone_2",
+          "type": "exit",
+          "polygon": [[257, 439], [256, 359], [370, 359], [375, 443]]
+        }
+      ],
+      "driveways": [
+        {
+          "id": "zone_1",
+          "polygon": [[264, 442], [263, 369], [372, 366], [375, 443]]
+        }
+      ]
+    }
+  }
+}
+
